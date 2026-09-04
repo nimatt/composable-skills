@@ -1,0 +1,5 @@
+# Templates and markdown must check out with LF on every platform. The build's stamp gate
+# hashes their content, and Git-for-Windows' core.autocrlf would otherwise change that hash
+# on checkout, making the gate fire on every session for no real change.
+*.md text eol=lf
+*.tmpl text eol=lf

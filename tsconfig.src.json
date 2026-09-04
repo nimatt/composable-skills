@@ -1,0 +1,9 @@
+{
+  // Shipped code runs on plain node, so `src/` is typechecked against node's globals only —
+  // a Bun API here would compile and then fail at runtime for anyone installing the package.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

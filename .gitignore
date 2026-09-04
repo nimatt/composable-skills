@@ -6,6 +6,9 @@ out
 dist
 *.tgz
 
+# this tool's own state directory, when the repo dogfoods itself
+.composable-skills/
+
 # code coverage
 coverage
 *.lcov
