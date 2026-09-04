@@ -190,7 +190,12 @@ overrides[n] … overrides[0]  →  <root>/<skill>/<slot>.md
 ```
 
 A root that does not exist, or one holding no file for that slot, is **not** an error — the scan
-simply falls through to the next. Containment is asserted on the paths it does find, the same way
+simply falls through to the next. **A root, or a file, that exists but cannot be read is a
+different observation**, and is warned about. The scan still falls through, so no lower-precedence
+root is abandoned and the compiled skill is what it would have been; but existence and readability
+are separate questions, and a slot quietly losing the override meant to fill it is exactly what a
+diagnostic is for. Not finding a file and not being able to read one must never reach the model as
+the same silence. Containment is asserted on the paths it does find, the same way
 `include:` is: every component of `<root>/<skill>/<slot>.md` is `lstat`'d, and an override that
 escapes its root by `..` or a symlink hop, or that names something other than a regular file,
 rejects the skill. An override root whose own last component is a symlink is rejected too:
@@ -224,7 +229,7 @@ the phase each is planned for, and running one prints that and exits non-zero.
 
 | Command | Run by | Behaviour |
 |---|---|---|
-| `build [--check]` | the `SessionStart` hook, a `postinstall` a repo added itself, rarely a human | compiles every skill to every target. `--check` writes nothing and exits non-zero if the output is stale, if the last build had errors, or if this run's own config produced an error. |
+| `build [--check]` | the `SessionStart` hook, a `postinstall` a repo added itself, rarely a human | compiles every skill to every target. `--check` writes nothing and exits non-zero if the output is stale, if the last build had errors, or if this run's own config produced an error. A skill the build declined to write, because a target held something that was not this tool's to replace, is not stale output: the decline is reported and `--check` still exits 0 unless something else failed. |
 | `init [--write\|--dry-run]` | consuming-repo maintainer, once | writes the config, the `.gitignore` lines, and the `SessionStart` hook entry. Diff-first: prints exactly what it would do, and writes nothing without `--write`. |
 | `override <skill> <slot> [--write\|--dry-run]` | a developer | creates and seeds the override file for one slot in the highest-precedence override root, and prints the path. Writes by default; never overwrites a file that exists. |
 | `lint` | a skills repo's CI | validates templates without building. Non-zero on any rejection. |
@@ -270,12 +275,26 @@ and it changes nothing about the string written, which must stay byte-stable wha
 
 It **refuses one step rather than overwriting a file**, letting the other two proceed and exiting
 non-zero, where that file is not writable by the process — `rename(2)` does not consult a mode,
-so a mode that says *do not write me* has to be honoured deliberately — or where any component of
-its path is a symlink, which is invariant 8 applied to a path that does not exist yet. No symlink
-is followed, and where `.claude` is one the settings file it points at is not even read: a verdict
-about the path outranks any verdict about contents. `.claude/settings.json` is refused for three
-more reasons of its own — it is malformed, it is valid JSONC rather than JSON (a rewrite would
-silently delete the comments), or it carries a `hooks` shape this tool does not recognise. And a
+so a mode that says *do not write me* has to be honoured deliberately — where any component of
+its path is a symlink, which is invariant 8 applied to a path that does not exist yet, or where
+the file **exists but cannot be read**: a merge is defined against the text already in the file,
+and a step that cannot see that text can only overwrite it. No symlink is followed, and where
+`.claude` is one the settings file it points at is not even read: a verdict about the path
+outranks any verdict about contents.
+
+**Existence is decided by `lstat`, never by a successful read.** A read that failed is otherwise
+indistinguishable from a file that is not there, and reading it that way costs two things at once:
+the unwritable refusal goes unreachable for exactly the files it was written for, since a mode
+that refuses a read usually refuses a write too, and the diff-first promise turns false, as the
+dry run announces it is *creating* a file that is already there. All three refusals are scoped to
+**the three paths `init` writes** — the config file, the `.gitignore`, and the repo's tracked
+`.claude/settings.json`. They do not reach the two files it only reads,
+`.claude/settings.local.json` and the user-level settings file, where one that cannot be read
+costs a warning that the duplicate-hook check could not be made, and nothing more: refusing to
+write a file this tool never writes would be a refusal about somebody else's permissions.
+
+`.claude/settings.json` is refused for three more reasons of its own — it is malformed, it is
+valid JSONC rather than JSON (a rewrite would silently delete the comments), or it carries a `hooks` shape this tool does not recognise. And a
 hook that already runs this tool under a *different* command string is reported and left alone
 rather than duplicated, since two would build twice at every session start and only the developer
 knows which string they meant to keep; that one exits 0, because nothing is broken.
@@ -379,18 +398,27 @@ likeliest real failure in the context the file channel exists for.
   `SKILL.md.tmpl`; a skill directory that is a symlink, which is not followed; a template or a
   skill directory that cannot be read; a skill name colliding across sources; a symlink inside a
   skill directory, which is not copied; an override file matching no declared slot; an override
-  file that cannot be read; a template using a frontmatter field a configured target does not
-  support (see *Targets*).
+  file, or an override root, that exists but cannot be read — distinct from a root that simply
+  does not exist, which is the ordinary fall-through and not a diagnostic; a template using a
+  frontmatter field a configured target does not support (see *Targets*).
 - *writing and pruning* — a directory of that name that exists and carries no marker, left
-  untouched; a stale directory that cannot be removed; nothing pruned this run because the
+  untouched; an entry of that name that is a symlink, left untouched and not read through; a
+  target holding a compiled skill of this build's name under another build's marker; a stale
+  directory that cannot be removed; a target directory that exists but could not be enumerated,
+  so nothing in it was considered for pruning; nothing pruned this run because the
   corpus could not be enumerated in full, or because the config resolved to no source root at
   all while the stamp still remembers compiled skills.
 - *locking* — another build holds the lock, so nothing was built; the state directory cannot be
   written, so the build proceeds unlocked.
 
 The organising principle: **reject when the output would be wrong or unsafe; warn when the
-input is probably a mistake.** A developer's typo never breaks a build. A conflict marker
-reaching the model always does.
+input is probably a mistake; and decline, with a warning, when something already in a target is
+not this tool's to replace.** The first two classify *inputs*; the third classifies what the
+build finds standing where it is about to write, which is neither the developer's mistake nor a
+reason to fail that skill everywhere else. A developer's typo never breaks a build. A conflict
+marker reaching the model always does. And an unmarked directory, or a symlink, occupying the
+place a compiled skill would take keeps that place — the build says so and writes the skill to
+every other target.
 
 **A target that did not exist before the run is named in the summary**, where anything was in
 fact built. A skills directory that was not there when the session started is not picked up, so
@@ -403,6 +431,15 @@ it appears.
 a human running the command, and a file because the first two are frequently unread. `init` and
 `override` print their own output to the two streams only: the build log is the record of the
 last *build*, and a human-run verb whose answer is already on their terminal has no claim on it.
+
+**Every report line is normalised to one line as it is rendered.** A diagnostic quotes template,
+override and marker text, replays messages read back from the stamp, and names skills after
+directories on disk — none of which this tool wrote. `build` runs at `SessionStart` and its
+stdout is fed to a model as instructions, so borrowed text carrying a newline could forge a line
+that reads as the tool's own report. Line terminators, control characters and format characters
+are escaped to a visible `\n`, `\r` or `\uXXXX` at the single point every channel renders
+through; tab is left alone, since it cannot start a line. It is a display rule and not a
+validation one — nothing is dropped, and what was quoted stays readable.
 
 Two qualifications. **Where the two streams name one destination, only stderr is written**, so
 nothing is said twice: the test is whether the descriptors share a `dev`/`ino`, not whether they
@@ -422,12 +459,35 @@ may be shared:
 
 - **Overwrite** — any directory carrying a valid marker may be rewritten, whichever repo wrote
   it. An **unmarked** directory never is: a build that would have written a skill of that name
-  warns and moves on, so a hand-written skill sitting in `.claude/skills/` is safe.
+  warns and moves on, so a hand-written skill sitting in `.claude/skills/` is safe. **An entry
+  that is a symlink is never rewritten either, and no marker is read through it**: the entry is
+  `lstat`'d and recognised as a link before anything about its destination is consulted, and the
+  build warns and moves on exactly as it does for an unmarked directory. A marker found by
+  following the link would be a claim about the link's *destination*, and the question asked here
+  is whether this entry, in this target, is the tool's to replace. The warning names it as a
+  symlink, which is invariant 8's requirement that none is ever followed *silently*.
 - **Prune** — only a directory whose marker names *this* build is removed, and only once its
   skill no longer exists in any `sources` root. A foreign marker, or one that will not parse, is
   not this build's to delete. That is what makes a shared target such as `~/.claude/skills`
   usable: two repos writing there do not erase each other. Two repos publishing a skill of the
-  *same name* still collide on content, last writer wins; the tool does not arbitrate that.
+  *same name* still collide on content, last writer wins; the tool does not arbitrate that, but
+  it does **name it**. Where a target holds a compiled skill of a name this build also publishes,
+  carrying a marker that names *another* build, the stamp check reports the collision and the
+  owner it found rather than bare staleness. Neither build's stamp can verify that file, so each
+  recompiles in full at every session start, indefinitely — the accepted cost of not arbitrating.
+  Saying whose marker is on the file is what turns a permanent unexplained rebuild into something
+  a developer can act on. The foreign content never gates a build: its hash is not the recorded
+  one, so the record does not describe the disk.
+- **A marker's fields are read as untrusted text.** It is written by another build — that is the
+  point of it — so `id` is a string this tool never validated and `repo` a path it never
+  resolved, and the collision warning above quotes whichever of them names the owner. A marker
+  declaring an `id` outside the shape invariant 5 requires, carrying a control character or a
+  line terminator in any field, or carrying a field longer than a path can be, is not a marker:
+  it reads as **unmarked**, the conservative end, so the directory is neither overwritten nor
+  pruned. **The marker file is opened without following a symlink**, and a link at that path
+  reads as unmarked for the same reason — invariant 8 one level below the skill directory it
+  already covers, since what the link named would otherwise be read as a claim about *this*
+  directory.
 - **A build identifies itself by `id`** where both the marker and the current config declare one,
   and by repo root path otherwise. With no `id`, a worktree therefore does not recognise the main
   checkout's output and declines to prune it — the conservative direction, and one more reason
@@ -436,6 +496,12 @@ may be shared:
   run** — a source root that did not resolve, one that cannot be read, a skill directory whose
   template cannot be read, or a skill directory that turned out to be a symlink. What the build
   could not read is indistinguishable from what was deleted upstream.
+- A **target** that exists but cannot be enumerated is that same observation pointed the other
+  way, and **nothing in that target is pruned** — the build warns, naming the target, and goes on
+  writing to the others. The scope differs because the cause does: a source root that cannot be
+  read leaves the corpus unknowable for every target at once, while a target that cannot be read
+  says nothing about any other. A target that does not exist at all is not this case; there is
+  nothing there to prune, and nothing to say.
 - **Zero usable source roots plus a stamp that remembers skills is not an emptied corpus**, and
   nothing is pruned. A corpus genuinely emptied one template at a time never reaches zero
   *roots*; a config that lost its `sources` key does, and pruning on that reading would delete
@@ -486,19 +552,41 @@ string it writes, which must stay byte-stable whatever is on disk today.
    declared `id`, every configured root's spec *and* the path it resolved to, the config file's
    own bytes, and the full contents of every source and override tree — with a symlink's
    destination recorded rather than followed, since retargeting one changes what the build
-   refuses to do. A matching hash is **necessary but not sufficient**: the stamp also records a
-   content hash of every `SKILL.md` it emitted, and each is re-read and re-hashed before the gate
-   closes, so editing or deleting a compiled skill by hand rebuilds it with the stamp intact.
+   refuses to do. A matching hash is **necessary but not sufficient**: the stamp also records
+   **one outcome per skill per target** — a content hash where a `SKILL.md` was written there,
+   and a decline where the target held something that was not this tool's to replace. Every
+   recorded hash is re-read and re-hashed before the gate closes, so editing or deleting a
+   compiled skill by hand rebuilds it with the stamp intact.
    Only `SKILL.md` is hashed — a `references/` tree dominates corpus bytes, and hashing it would
    put the gated path's cost back where the stamp exists to avoid it. A skill that failed carries
-   its *previous* hash forward rather than dropping to none, so it stays integrity-checked while
-   it is broken; a record of no output at all is honoured only where no output is in fact there.
-   A `failed` list therefore cannot hide a file from the check, and **a record that verifies
-   nothing gates nothing** — if no skill hashes clean the build runs, which is what closes a
-   crafted stamp, since claiming every skill failed is the cheapest way to claim there is nothing
-   to check. A gated
-   run is not a silent one — it replays the last real build's diagnostics, and it still writes
-   the log.
+   its *previous* record forward rather than dropping to none, so it stays integrity-checked while
+   it is broken. **The outcome is recorded per target because it differs per target.** A skill
+   written to one target and declined in another has no single state, and collapsing the pair to
+   *declined* would strip the integrity check from a compiled skill that really is there — which
+   anyone able to create a directory in a shared target such as `~/.claude/skills`, an
+   arrangement the rules above deliberately support, could arrange for themselves. A recorded
+   decline is re-checked by asking whether **a non-owned entry still exists at that path**, never
+   whether the path is still unmarked. A path that has since been emptied also reads as unmarked,
+   so the weaker test would honour the decline forever and never write the skill to a target that
+   is now free — and it would break the promise above, that deleting a compiled skill by hand
+   rebuilds it. A decline that still holds is exactly what a fresh build would find and decline
+   over again, so re-reading one **confirms the record** and counts as verification done, the
+   same way a hash that still matches does. A corpus whose every skill is declined therefore
+   gates, which is what the `build [--check]` row above promises: a decline is not stale output.
+   A `failed` list cannot hide a file from the check, since a target carrying no recorded outcome
+   at all must hold no `SKILL.md`; and **a record that confirms nothing against the disk gates
+   nothing** — a `failed` list names no path to go and look at, so a stamp claiming every skill
+   failed is claiming there was never anything to check, and the build runs. That floor is not
+   the trust boundary and is not sold as one: whoever can write the stamp can also write a
+   `SKILL.md` of their own into a target and record *its* hash as `written`, which re-reads,
+   matches, and gates. The stamp is trusted exactly as far as the directory it lives in, which is
+   why nothing read back from it is rendered without going through the normalisation under
+   *Diagnostics* below. A gated run is not a silent one — it replays the last real build's
+   diagnostics, and it still writes the log. **A `--check` that finds the output stale while the
+   inputs hash unchanged replays them too**: staleness is then a verdict about the *output*, and
+   the last build's account is the only one of why — a template that has failed to compile every
+   run since leaves nothing on disk to verify, and a bare "stale, run the build" names a remedy
+   that cannot clear it.
 2. **The build stages each skill in a temp directory inside the target** and swaps it into place
    on success, so a failed build never destroys the last good output.
 3. **It exits 0 unconditionally**, including on failure.
@@ -527,7 +615,8 @@ string it writes, which must stay byte-stable whatever is on disk today.
 8. **No symlink is ever followed or copied, and none is followed silently.** One containment
    discipline covers `include:` and overrides alike — every path component is `lstat`'d and any
    symlink hop rejects, an override root that is itself a symlink included. A symlink inside a
-   skill directory is warned about and skipped rather than copied. A symlinked skill directory is
+   skill directory is warned about and skipped rather than copied. An ownership marker that is a
+   symlink is not read through, and its directory reads as unmarked. A symlinked skill directory is
    not discovered as a skill, warns, and blocks pruning for that run — its compiled output would
    otherwise be deleted as a skill that no longer exists. And the stamp records a symlink's
    destination without reading through it, since retargeting one changes what the build refuses

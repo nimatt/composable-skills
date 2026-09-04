@@ -38,6 +38,8 @@ export function splitFrontmatter(text: string): FrontmatterSplit | FrontmatterEr
   }
 
   for (let i = 1; i < lines.length; i++) {
+    // The scan starts after the opening fence, and `i` goes on to slice `lines` itself.
+    // biome-ignore lint/style/noNonNullAssertion: `.entries()` would need a slice plus an offset
     if (FENCE.test(lines[i]!)) {
       const frontmatter = `${lines.slice(0, i + 1).join("\n")}\n`;
       const body = lines.slice(i + 1).join("\n");
@@ -50,12 +52,10 @@ export function splitFrontmatter(text: string): FrontmatterSplit | FrontmatterEr
 
 export function frontmatterFields(frontmatter: string): string[] {
   const fields: string[] = [];
-  const lines = frontmatter.split("\n");
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i]!;
+  for (const line of frontmatter.split("\n").slice(1)) {
     if (FENCE.test(line)) break;
-    const match = /^([A-Za-z_][A-Za-z0-9_-]*):/.exec(line);
-    if (match) fields.push(match[1]!);
+    const field = /^([A-Za-z_][A-Za-z0-9_-]*):/.exec(line)?.[1];
+    if (field !== undefined) fields.push(field);
   }
   return fields;
 }

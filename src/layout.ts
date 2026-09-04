@@ -12,6 +12,10 @@ export const LOG_FILENAME = "build.log";
 /** Written beside every emitted `SKILL.md` to mark the directory as the compiler's to replace. */
 export const OWNER_MARKER = ".composable-skills-owner";
 
+/** The files the compiler writes itself. A source skill directory may not supply either. */
+export const OUTPUT_FILENAME = "SKILL.md";
+export const OWNED_OUTPUT_NAMES = [OUTPUT_FILENAME.toLowerCase(), OWNER_MARKER.toLowerCase()];
+
 /**
  * Takes the root rather than a `Config` so this module depends on nothing else in `src/` — the
  * state layout is the same fact whether a build, a crash report or `init` is asking for it, and

@@ -1,8 +1,9 @@
 {
   "name": "composable-skills",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A node CLI that compiles skill templates into SKILL.md files and writes them where an agent harness will find them.",
   "license": "MIT",
+  "author": "Mattias Nilsson",
   "type": "module",
   "bin": {
     "composable-skills": "./dist/cli.js"
@@ -24,13 +25,14 @@
     "build": "bun build ./src/cli.ts --target=node --outdir=dist",
     "test": "bun test",
     "typecheck": "tsc --noEmit -p tsconfig.src.json && tsc --noEmit -p tsconfig.json",
+    "format": "biome format --write .",
+    "lint": "biome check .",
     "prepack": "bun run build"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.12",
     "@types/bun": "^1.3.14",
-    "@types/node": "^26.2.0"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+    "@types/node": "^26.2.0",
+    "typescript": "^5.9.3"
   }
 }

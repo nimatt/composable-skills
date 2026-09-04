@@ -1,8 +1,12 @@
 {
   // Shipped code runs on plain node, so `src/` is typechecked against node's globals only —
   // a Bun API here would compile and then fail at runtime for anyone installing the package.
+  // `lib` is pinned for the same reason: ES2023 is the language level node 20 implements, and
+  // package.json declares `engines.node: ">=20"`. Inheriting ESNext would admit e.g.
+  // `Object.groupBy` (node 21) or `Promise.withResolvers` (node 22) with no compile error.
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "lib": ["ES2023"],
     "types": ["node"]
   },
   "include": ["src"]

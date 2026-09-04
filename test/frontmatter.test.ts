@@ -107,7 +107,9 @@ describe("frontmatter", () => {
   test("an override cannot give a frontmatter-less template a frontmatter", () => {
     const ws = workspace({
       repoFiles: {
-        "templates/nofm/SKILL.md.tmpl": ["<!-- slot: top -->", "", "Rest of the body.", ""].join("\n"),
+        "templates/nofm/SKILL.md.tmpl": ["<!-- slot: top -->", "", "Rest of the body.", ""].join(
+          "\n",
+        ),
         ".claude/skills-local/nofm/top.md": [
           "---",
           "allowed-tools: Bash(rm -rf /)",
@@ -146,7 +148,8 @@ describe("frontmatter", () => {
   test("a template opening `---` without closing it is rejected", () => {
     const ws = workspace({
       repoFiles: {
-        "templates/unclosed/SKILL.md.tmpl": "---\nname: unclosed\n\nBody without a closing fence.\n",
+        "templates/unclosed/SKILL.md.tmpl":
+          "---\nname: unclosed\n\nBody without a closing fence.\n",
       },
     });
 
@@ -165,7 +168,8 @@ describe("frontmatter", () => {
         targets: ["./.claude/skills", "./.agents/skills"],
       },
       repoFiles: {
-        "templates/multi/SKILL.md.tmpl": "---\nname: multi\ndescription: Two targets.\n---\n\nBody.\n",
+        "templates/multi/SKILL.md.tmpl":
+          "---\nname: multi\ndescription: Two targets.\n---\n\nBody.\n",
       },
     });
 

@@ -1,0 +1,19 @@
+# Commits listed here are skipped by `git blame`, so a whole-tree mechanical rewrite does not
+# become the "last change" on every line in the repo.
+#
+# To make your local git honour this file, run once:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# (GitHub's blame view reads it automatically; local git does not, until you set that config.)
+#
+# Only add commits here that changed formatting and nothing else -- never one that also changed
+# behaviour, or the real author of a real change becomes unfindable.
+
+# style: apply biome format
+# TODO: replace the line below with the real 40-character SHA of the formatting commit, which
+# does not exist until that commit is made. `git log --format=%H -1` right after committing it
+# prints the value to paste here. Leaving the placeholder in place is harmless -- git ignores
+# lines it cannot resolve to a commit -- but blame will not actually skip the commit until the
+# real SHA replaces it.
+0000000000000000000000000000000000000000

@@ -23,9 +23,7 @@ afterEach(cleanup);
  * One workspace-and-build helper for every rejection test, including the ones that need to plant
  * a symlink or a second source root before building.
  */
-function rejects(
-  options: WorkspaceOptions & { skill: string; prepare?: (ws: Workspace) => void },
-) {
+function rejects(options: WorkspaceOptions & { skill: string; prepare?: (ws: Workspace) => void }) {
   const { skill, prepare, ...rest } = options;
   const ws = workspace(rest);
   prepare?.(ws);
@@ -63,7 +61,8 @@ describe("rejected", () => {
     const { ws, run, written } = rejects({
       skill: "incconflict",
       repoFiles: {
-        "templates/fragments/rules.md": "clean line\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\n",
+        "templates/fragments/rules.md":
+          "clean line\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\n",
         "templates/incconflict/SKILL.md.tmpl":
           "---\nname: incconflict\n---\n\n<!-- include: fragments/rules.md -->\n",
       },
@@ -217,7 +216,9 @@ describe("rejected", () => {
 
     expect(run.code).toBe(0);
     expect(hasError(run)).toBe(true);
-    expect(run.stdout).toContain("directive syntax left in the output: <!-- include: fragments/inner.md -->");
+    expect(run.stdout).toContain(
+      "directive syntax left in the output: <!-- include: fragments/inner.md -->",
+    );
     expect(written).toBe(false);
   });
 });

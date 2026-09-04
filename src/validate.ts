@@ -15,10 +15,9 @@ const CONFLICT_MARKER_RE = /^(<{7}|={7}|>{7}|\|{7})([ \t]|$)/;
 
 export function findConflictMarkers(text: string, file?: string): Finding[] {
   const findings: Finding[] = [];
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (CONFLICT_MARKER_RE.test(lines[i]!)) {
-      findings.push({ message: `merge-conflict marker "${lines[i]!.trim()}"`, line: i + 1, file });
+  for (const [index, line] of text.split("\n").entries()) {
+    if (CONFLICT_MARKER_RE.test(line)) {
+      findings.push({ message: `merge-conflict marker "${line.trim()}"`, line: index + 1, file });
     }
   }
   return findings;
@@ -26,10 +25,12 @@ export function findConflictMarkers(text: string, file?: string): Finding[] {
 
 export function findLeftoverDirectives(text: string): Finding[] {
   const findings: Finding[] = [];
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (LEFTOVER_RE.test(lines[i]!)) {
-      findings.push({ message: `directive syntax left in the output: ${lines[i]!.trim()}`, line: i + 1 });
+  for (const [index, line] of text.split("\n").entries()) {
+    if (LEFTOVER_RE.test(line)) {
+      findings.push({
+        message: `directive syntax left in the output: ${line.trim()}`,
+        line: index + 1,
+      });
     }
   }
   return findings;
@@ -39,16 +40,21 @@ const SLOT_ANYWHERE_RE = /<!--\s*\/?\s*slot\b/i;
 
 export function findSlotsInFrontmatter(frontmatter: string): Finding[] {
   const findings: Finding[] = [];
-  const lines = frontmatter.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (SLOT_ANYWHERE_RE.test(lines[i]!)) {
-      findings.push({ message: "a slot may not be declared in the frontmatter region", line: i + 1 });
+  for (const [index, line] of frontmatter.split("\n").entries()) {
+    if (SLOT_ANYWHERE_RE.test(line)) {
+      findings.push({
+        message: "a slot may not be declared in the frontmatter region",
+        line: index + 1,
+      });
     }
   }
   return findings;
 }
 
-export function checkFrontmatterIdentity(templateFrontmatter: string, output: string): Finding | null {
+export function checkFrontmatterIdentity(
+  templateFrontmatter: string,
+  output: string,
+): Finding | null {
   const split = splitFrontmatter(output);
   if (!split.ok) return { message: `emitted frontmatter is malformed: ${split.message}` };
   if (split.frontmatter !== templateFrontmatter) {
@@ -80,7 +86,9 @@ export function findUnsupportedFields(fields: string[], targets: Root[]): Findin
   const findings: Finding[] = [];
   for (const field of fields) {
     if (!CODEX_FIELDS.includes(field)) {
-      findings.push({ message: `frontmatter field "${field}" is not supported by codex (${where})` });
+      findings.push({
+        message: `frontmatter field "${field}" is not supported by codex (${where})`,
+      });
     }
   }
   return findings;

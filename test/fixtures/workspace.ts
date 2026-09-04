@@ -8,15 +8,45 @@ import { runOverride } from "../../src/override.ts";
 
 const created: string[] = [];
 
+/**
+ * Every path `chmod()` has changed the mode of. `fs.rmSync(…, { force: true })` still throws
+ * `EACCES` on a tree containing a mode-000 directory, so a test that locks a directory used to
+ * have to unlock it by hand in a `finally` — and forgetting cost more than that one test, because
+ * the throw escaped `cleanup()`'s loop and abandoned every temp directory still queued behind it.
+ * Recording the paths here moves that obligation off the test author.
+ */
+const chmodded: string[] = [];
+
 function tempDir(): string {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "composable-skills-test-")));
   created.push(dir);
   return dir;
 }
 
+function restoreModes(): void {
+  // Shallowest first: a mode-000 parent has to be reopened before anything under it can be
+  // chmod'd, and a parent's path is always the shorter string.
+  for (const target of chmodded.splice(0).sort((a, b) => a.length - b.length)) {
+    try {
+      fs.chmodSync(target, 0o700);
+    } catch {
+      // Already removed by the test, or never created. The removal below is what has to succeed.
+    }
+  }
+}
+
 export function cleanup(): void {
-  while (created.length > 0) {
-    fs.rmSync(created.pop()!, { recursive: true, force: true });
+  restoreModes();
+  const failures: unknown[] = [];
+  for (const dir of created.splice(0).reverse()) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "cleanup() could not remove every temp directory");
   }
 }
 
@@ -61,8 +91,11 @@ export function symlink(target: string, root: string, rel: string): void {
   fs.symlinkSync(target, abs);
 }
 
+/** Recorded, so `cleanup()` can reopen the path before removing the tree it sits in. */
 export function chmod(root: string, rel: string, mode: number): void {
-  fs.chmodSync(path.join(root, ...rel.split("/")), mode);
+  const abs = path.join(root, ...rel.split("/"));
+  chmodded.push(abs);
+  fs.chmodSync(abs, mode);
 }
 
 export function modeOf(root: string, rel: string): number {
@@ -73,6 +106,114 @@ export function mkdir(root: string, rel: string): string {
   const abs = path.join(root, ...rel.split("/"));
   fs.mkdirSync(abs, { recursive: true });
   return abs;
+}
+
+/** The `fs` functions `withFsFailures()` patches, mapped to how many of their leading arguments are paths. */
+const PATH_ARGUMENTS = {
+  readFileSync: 1,
+  writeFileSync: 1,
+  lstatSync: 1,
+  statSync: 1,
+  readdirSync: 1,
+  mkdirSync: 1,
+  rmSync: 1,
+  unlinkSync: 1,
+  openSync: 1,
+  chmodSync: 1,
+  renameSync: 2,
+  copyFileSync: 2,
+} as const;
+
+export type PatchableFsCall = keyof typeof PATH_ARGUMENTS;
+
+export interface FsFailure {
+  /** Which `fs` functions to patch. Calls to anything else reach the real implementation untouched. */
+  calls: PatchableFsCall[];
+  /**
+   * An absolute path to match exactly, or a predicate applied to each path argument of the call.
+   * For the two-path calls (`renameSync`, `copyFileSync`) either argument matching is enough.
+   */
+  when: string | ((target: string) => boolean);
+  /** errno the injected error carries. Defaults to `EACCES`. */
+  code?: string;
+  /** Message the injected error carries. Defaults to one shaped like libuv's. */
+  message?: string;
+}
+
+export interface FsFailureRun<T> {
+  result: T;
+  /** `"<call> <path>"` for every injected throw, in order. An empty array means the patch never fired. */
+  fired: string[];
+}
+
+function injectedError(
+  failure: FsFailure,
+  call: PatchableFsCall,
+  target: string,
+): NodeJS.ErrnoException {
+  const code = failure.code ?? "EACCES";
+  const error: NodeJS.ErrnoException = new Error(
+    failure.message ?? `${code}: injected by the test fixture, ${call} '${target}'`,
+  );
+  error.code = code;
+  error.syscall = call;
+  error.path = target;
+  return error;
+}
+
+/**
+ * Runs `run()` with the named `fs` functions throwing for the paths `when` selects, and delegating
+ * to the real implementation for every other path. Everything is restored in a `finally`.
+ *
+ * **Path-selective, deliberately not call-count-selective.** Keying an injected failure on "the
+ * second `renameSync`" pins the test to the *order* `src/` happens to issue its syscalls in today,
+ * so any later refactor that reorders, adds or removes a call silently retargets the failure at a
+ * different operation and the test keeps passing while proving something else. Keying on the path
+ * pins it to the operation the test actually means.
+ *
+ * Selectivity is also what makes this safe to wrap around `build()`/`init()`/`override()` at all:
+ * see `captured()` below, whose own bookkeeping runs inside this window. A blanket patch — one that
+ * throws for every call — breaks the fixture rather than the code under test.
+ *
+ * `fired` is returned so a test can assert the failure it asked for really happened; a predicate
+ * that matches nothing would otherwise leave the test green and hollow.
+ */
+export function withFsFailures<T>(
+  failures: FsFailure | FsFailure[],
+  run: () => T,
+): FsFailureRun<T> {
+  const list = Array.isArray(failures) ? failures : [failures];
+  const fired: string[] = [];
+  const patchable = fs as unknown as Record<PatchableFsCall, (...args: unknown[]) => unknown>;
+  const originals = new Map<PatchableFsCall, (...args: unknown[]) => unknown>();
+
+  const selects = (failure: FsFailure, target: string): boolean =>
+    typeof failure.when === "string"
+      ? path.resolve(target) === path.resolve(failure.when)
+      : failure.when(target);
+
+  try {
+    for (const call of new Set(list.flatMap((failure) => failure.calls))) {
+      const original = patchable[call];
+      originals.set(call, original);
+      const patched = (...args: unknown[]) => {
+        for (const failure of list) {
+          if (!failure.calls.includes(call)) continue;
+          for (const arg of args.slice(0, PATH_ARGUMENTS[call])) {
+            if (typeof arg !== "string" || !selects(failure, arg)) continue;
+            fired.push(`${call} ${arg}`);
+            throw injectedError(failure, call, arg);
+          }
+        }
+        return original(...args);
+      };
+      // Some of these carry extra properties (`realpathSync.native`); the patch keeps them.
+      patchable[call] = Object.assign(patched, original);
+    }
+    return { result: run(), fired };
+  } finally {
+    for (const [call, original] of originals) patchable[call] = original;
+  }
 }
 
 /**
@@ -143,7 +284,11 @@ export function workspace(options: WorkspaceOptions = {}): Workspace {
      * does not consult `HOME` under every runtime, which is why `captured()` patches it outright —
      * these two are the belt beside that brace, and they are what a subprocess gets.
      */
-    env: { COMPOSABLE_SKILLS_HOME: home, HOME: osHome, XDG_CONFIG_HOME: path.join(osHome, ".config") },
+    env: {
+      COMPOSABLE_SKILLS_HOME: home,
+      HOME: osHome,
+      XDG_CONFIG_HOME: path.join(osHome, ".config"),
+    },
   };
 }
 
@@ -187,7 +332,12 @@ export interface BuildOptions {
 /** Restores the property exactly, including the case where it did not exist at all. */
 function force(stream: object, key: string, value: unknown): () => void {
   const original = Object.getOwnPropertyDescriptor(stream, key);
-  Object.defineProperty(stream, key, { value, writable: true, configurable: true, enumerable: true });
+  Object.defineProperty(stream, key, {
+    value,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
   return () => {
     if (original === undefined) delete (stream as Record<string, unknown>)[key];
     else Object.defineProperty(stream, key, original);
@@ -227,8 +377,21 @@ function openCapture(routing: StreamRouting): Capture {
  * Runs one verb with fds 1 and 2 pointed at real files, so `emitReport`'s one-destination rule is
  * exercised against real descriptors rather than a faked `isTTY`. Shared by every verb, so a test
  * of `init` or `override` is as invocation-independent as a test of `build`.
+ *
+ * **This whole function is inside any `fs` patch a test has installed around a verb**, and it does
+ * its own I/O throughout: `mkdtempSync`/`existsSync` for the capture directory, `openSync` for the
+ * two descriptors, `writeSync` on every captured write, `closeSync` on the way out, and
+ * `readFileSync` on the capture files *after* the run but still inside the patch window. A patch
+ * that throws unconditionally therefore breaks the fixture, not the code under test, and the
+ * failure looks like it came from `src/`. Patch through `withFsFailures()` above, which selects by
+ * path and so never touches a capture file. Do not move the read out of the window to work around
+ * this: when the capture files are read is part of what the stdout assertions are pinned to.
  */
-function captured(routing: StreamRouting, run: () => number, homedir: string | null = null): BuildRun {
+function captured(
+  routing: StreamRouting,
+  run: () => number,
+  homedir: string | null = null,
+): BuildRun {
   const writes: StreamWrite[] = [];
   const capture = openCapture(routing);
 
@@ -356,7 +519,7 @@ export function cli(ws: Workspace, args: string[], cwd = ws.repo): CliRun {
     [
       'import os from "node:os";',
       `const home = ${JSON.stringify(ws.osHome)};`,
-      '(os as unknown as { homedir: () => string }).homedir = () => home;',
+      "(os as unknown as { homedir: () => string }).homedir = () => home;",
       `await import(${JSON.stringify(cliPath)});`,
       "",
     ].join("\n"),
@@ -411,7 +574,9 @@ export function bodyOf(text: string): string {
 export function snapshot(root: string): string[] {
   const out: string[] = [];
   const walk = (dir: string, prefix: string) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    for (const entry of fs
+      .readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const abs = path.join(dir, entry.name);
       const rel = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
       if (entry.isDirectory()) walk(abs, rel);

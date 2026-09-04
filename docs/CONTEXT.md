@@ -96,17 +96,21 @@ _Avoid_: install location, output (ambiguous with the compiled skill itself)
 
 **Marker**:
 The file the tool leaves inside every skill directory it emits, naming the tool and the repo that
-built it; a directory without one is never overwritten, and only a directory whose marker names
-*this* build is ever pruned.
+built it; a directory without one is never overwritten — nor is a target entry that is a
+symlink, whose marker is not read through it — and only a directory whose marker names *this*
+build is ever pruned.
 _Avoid_: lock file, manifest (it records one directory's ownership, not a list of skills)
 
 **Stamp**:
 The record of the last real build — a content hash of the tool version, the declared `id`, every
 configured root and the path it resolved to, the config file, and every source and override
-tree, plus which skills failed, their diagnostics, and a hash of each `SKILL.md` emitted — kept
-with the build log in the `.composable-skills/` state directory at the consuming repo's root. A
-matching hash gates a rebuild only if the recorded output is also still in place and unchanged;
-a gated run compiles nothing, but replays those diagnostics and still writes the log.
+tree, plus which skills failed, their diagnostics, and **one outcome per skill per target**: a
+hash of the `SKILL.md` written there, or a decline where the target held something that was not
+this build's to replace. Kept with the build log in the `.composable-skills/` state directory at
+the consuming repo's root. A matching hash gates a rebuild only where the recorded outcomes still
+hold — every recorded hash re-read and unchanged, every recorded decline still facing a non-owned
+entry at that path — and a record that confirms nothing against the disk gates nothing. A gated
+run compiles nothing, but replays those diagnostics and still writes the log.
 _Avoid_: cache, lockfile
 
 **Session hook**:

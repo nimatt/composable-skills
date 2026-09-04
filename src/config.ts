@@ -5,11 +5,16 @@ import { createRequire } from "node:module";
 
 import type { Config, Diagnostic, Root } from "./types.ts";
 import { describe, error, warning } from "./types.ts";
+import { isAtOrUnder } from "./contain.ts";
 
 export const CONFIG_FILENAMES = ["composable-skills.jsonc", "composable-skills.json"] as const;
 
 export const DEFAULT_SOURCES: string[] = [];
-export const DEFAULT_OVERRIDES = ["${home}/global", "./.claude/skills-local", "${home}/repos/${id}"];
+export const DEFAULT_OVERRIDES = [
+  "${home}/global",
+  "./.claude/skills-local",
+  "${home}/repos/${id}",
+];
 export const DEFAULT_TARGETS = ["./.claude/skills"];
 
 export interface LoadedConfig {
@@ -19,27 +24,44 @@ export interface LoadedConfig {
 
 export interface ConfigFailure {
   fatal: string;
+  /**
+   * Everything observed before the load gave up — including the per-key error that says *which*
+   * key is wrong. `fatal` alone only says the file is unusable, which on its own leaves a developer
+   * with three keys to guess between.
+   */
+  diagnostics: Diagnostic[];
 }
 
 export function homeRoot(env: NodeJS.ProcessEnv = process.env): string {
   const relocated = env.COMPOSABLE_SKILLS_HOME;
   if (relocated && relocated.trim() !== "") return path.resolve(expandTilde(relocated.trim()));
   const xdg = env.XDG_CONFIG_HOME;
-  const base = xdg && xdg.trim() !== "" ? expandTilde(xdg.trim()) : path.join(os.homedir(), ".config");
+  const base =
+    xdg && xdg.trim() !== "" ? expandTilde(xdg.trim()) : path.join(os.homedir(), ".config");
   return path.resolve(path.join(base, "composable-skills"));
 }
 
 export function expandTilde(value: string): string {
   if (value === "~") return os.homedir();
-  if (value.startsWith("~/") || value.startsWith("~\\")) return path.join(os.homedir(), value.slice(2));
+  if (value.startsWith("~/") || value.startsWith("~\\"))
+    return path.join(os.homedir(), value.slice(2));
   return value;
 }
 
-export function stripJsonComments(text: string): string {
+/**
+ * JSONC is reduced to JSON by *blanking* what JSON cannot hold rather than deleting it: comments
+ * become spaces (newlines kept as newlines) and a trailing comma becomes a space. The reduced text
+ * therefore has the same length and the same line breaks as the file on disk, so the `position`,
+ * `line` and `column` a parser reports for a syntax error address the developer's own file.
+ * Deleting instead would shift every offset after the first comment.
+ */
+export function blankJsonComments(text: string): string {
   let out = "";
   let inString = false;
   let i = 0;
   while (i < text.length) {
+    // The cursor advances by an escape pair or a whole comment run, not one unit at a time.
+    // biome-ignore lint/style/noNonNullAssertion: `i < text.length` is the bound, on the line above
     const ch = text[i]!;
     if (inString) {
       out += ch;
@@ -63,15 +85,20 @@ export function stripJsonComments(text: string): string {
       continue;
     }
     if (ch === "/" && text[i + 1] === "/") {
-      while (i < text.length && text[i] !== "\n") i++;
+      while (i < text.length && text[i] !== "\n") {
+        out += " ";
+        i++;
+      }
       continue;
     }
     if (ch === "/" && text[i + 1] === "*") {
+      out += "  ";
       i += 2;
       while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) {
-        if (text[i] === "\n") out += "\n";
+        out += text[i] === "\n" ? "\n" : " ";
         i++;
       }
+      if (i < text.length) out += "  ";
       i += 2;
       continue;
     }
@@ -81,10 +108,12 @@ export function stripJsonComments(text: string): string {
   return out;
 }
 
-export function stripTrailingCommas(text: string): string {
+export function blankTrailingCommas(text: string): string {
   let out = "";
   let inString = false;
   for (let i = 0; i < text.length; i++) {
+    // The cursor skips the unit after a backslash, so this is not a per-element walk.
+    // biome-ignore lint/style/noNonNullAssertion: `i < text.length` is the bound, on the line above
     const ch = text[i]!;
     if (inString) {
       out += ch;
@@ -103,9 +132,13 @@ export function stripTrailingCommas(text: string): string {
     }
     if (ch === ",") {
       let j = i + 1;
+      // biome-ignore lint/style/noNonNullAssertion: `j < text.length` bounds it in this condition
       while (j < text.length && /\s/.test(text[j]!)) j++;
       const next = text[j];
-      if (next === "}" || next === "]") continue;
+      if (next === "}" || next === "]") {
+        out += " ";
+        continue;
+      }
     }
     out += ch;
   }
@@ -113,7 +146,7 @@ export function stripTrailingCommas(text: string): string {
 }
 
 export function parseJsonc(text: string): unknown {
-  return JSON.parse(stripTrailingCommas(stripJsonComments(text)));
+  return JSON.parse(blankTrailingCommas(blankJsonComments(text)));
 }
 
 export function findConfigFile(startDir: string): string | null {
@@ -166,7 +199,9 @@ function readStringArray(
   const value = raw[key];
   if (value === undefined) return fallback;
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    diagnostics.push(error(`"${key}" must be an array of strings`, { file: configPath ?? undefined }));
+    diagnostics.push(
+      error(`"${key}" must be an array of strings`, { file: configPath ?? undefined }),
+    );
     return null;
   }
   return value as string[];
@@ -194,13 +229,6 @@ export function isValidId(value: string): boolean {
   return ID_CHARSET.test(value);
 }
 
-function isContained(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  if (relative === "") return true;
-  if (path.isAbsolute(relative)) return false;
-  return relative !== ".." && !relative.startsWith(`..${path.sep}`);
-}
-
 function expandVariables(
   spec: string,
   home: string,
@@ -214,9 +242,7 @@ function expandVariables(
     );
     return null;
   }
-  const expanded = spec
-    .replaceAll("${home}", home)
-    .replaceAll("${id}", id ?? "");
+  const expanded = spec.replaceAll("${home}", home).replaceAll("${id}", id ?? "");
   return expandTilde(expanded);
 }
 
@@ -266,7 +292,7 @@ function resolveRoots(
       resolved = path.resolve(repoRoot, expanded);
     }
 
-    if (spec.includes("${home}") && !isContained(home, resolved)) {
+    if (spec.includes("${home}") && !isAtOrUnder(home, resolved)) {
       diagnostics.push(
         error(`${kind} "${spec}" resolves to ${resolved}, outside ${home} — skipped`),
       );
@@ -296,23 +322,25 @@ export function loadConfig(
     try {
       configText = fs.readFileSync(configPath, "utf8");
     } catch (cause) {
-      return { fatal: `cannot read ${configPath}: ${describe(cause)}` };
+      return { fatal: `cannot read ${configPath}: ${describe(cause)}`, diagnostics };
     }
     let parsed: unknown;
     try {
       parsed = parseJsonc(configText);
     } catch (cause) {
-      return { fatal: `cannot parse ${configPath}: ${describe(cause)}` };
+      return { fatal: `cannot parse ${configPath}: ${describe(cause)}`, diagnostics };
     }
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { fatal: `${configPath} must contain a JSON object` };
+      return { fatal: `${configPath} must contain a JSON object`, diagnostics };
     }
     raw = parsed as Record<string, unknown>;
   }
 
   for (const key of Object.keys(raw)) {
     if (!["id", "sources", "overrides", "targets"].includes(key)) {
-      diagnostics.push(warning(`unknown config key "${key}" ignored`, { file: configPath ?? undefined }));
+      diagnostics.push(
+        warning(`unknown config key "${key}" ignored`, { file: configPath ?? undefined }),
+      );
     }
   }
 
@@ -320,7 +348,7 @@ export function loadConfig(
   const rawId = raw["id"];
   if (rawId !== undefined) {
     if (typeof rawId !== "string" || rawId.trim() === "") {
-      return { fatal: `${configPath}: "id" must be a non-empty string` };
+      return { fatal: `${configPath}: "id" must be a non-empty string`, diagnostics };
     }
     id = rawId.trim();
     if (!isValidId(id)) {
@@ -328,15 +356,22 @@ export function loadConfig(
         fatal:
           `${configPath}: "id" must be a single path segment of letters, digits, ".", "-" or "_" ` +
           `— got ${JSON.stringify(id)}`,
+        diagnostics,
       };
     }
   }
 
   const sourceSpecs = readStringArray(raw, "sources", DEFAULT_SOURCES, diagnostics, configPath);
-  const overrideSpecs = readStringArray(raw, "overrides", DEFAULT_OVERRIDES, diagnostics, configPath);
+  const overrideSpecs = readStringArray(
+    raw,
+    "overrides",
+    DEFAULT_OVERRIDES,
+    diagnostics,
+    configPath,
+  );
   const targetSpecs = readStringArray(raw, "targets", DEFAULT_TARGETS, diagnostics, configPath);
   if (sourceSpecs === null || overrideSpecs === null || targetSpecs === null) {
-    return { fatal: `${configPath} is invalid; nothing was built` };
+    return { fatal: `${configPath} is invalid; nothing was built`, diagnostics };
   }
   if (targetSpecs.length === 0) {
     diagnostics.push(warning("no targets configured — nothing will be written"));

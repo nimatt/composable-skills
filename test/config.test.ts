@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import os from "node:os";
 import path from "node:path";
 
-import { homeRoot } from "../src/config.ts";
+import { blankJsonComments, blankTrailingCommas, homeRoot, parseJsonc } from "../src/config.ts";
 import {
   build,
   cleanup,
@@ -10,6 +10,9 @@ import {
   exists,
   hasError,
   hasWarning,
+  init,
+  lines,
+  override,
   read,
   remove,
   workspace,
@@ -347,4 +350,190 @@ describe("id", () => {
       expect(build(ws, { check: true }).code).toBe(1);
     });
   }
+});
+
+describe("a config that cannot be loaded", () => {
+  const TEMPLATE = {
+    "templates/x/SKILL.md.tmpl": "---\nname: x\n---\n\nBody.\n",
+  };
+
+  for (const key of ["sources", "overrides", "targets"] as const) {
+    test(`"${key}" as a bare string names that key, not just the file`, () => {
+      const ws = workspace({
+        config: { id: "acme", [key]: "./templates" },
+        repoFiles: TEMPLATE,
+      });
+
+      const run = build(ws);
+
+      expect(run.code).toBe(0);
+      expect(hasError(run)).toBe(true);
+      expect(run.stdout).toContain(`"${key}" must be an array of strings`);
+      expect(exists(ws.repo, ".claude/skills")).toBe(false);
+    });
+  }
+
+  test("the per-key error and the generic summary are both printed, in that order", () => {
+    const ws = workspace({
+      config: { id: "acme", sources: "./templates" },
+      repoFiles: TEMPLATE,
+    });
+
+    const run = build(ws);
+    const printed = lines(run);
+    const configPath = path.join(ws.repo, "composable-skills.jsonc");
+
+    expect(printed).toEqual([
+      `composable-skills: error [${configPath}] "sources" must be an array of strings`,
+      `composable-skills: error ${configPath} is invalid; nothing was built`,
+    ]);
+  });
+
+  test("every wrong key is named, not just the first", () => {
+    const ws = workspace({
+      config: { id: "acme", sources: "./templates", overrides: 7, targets: [1, 2] },
+      repoFiles: TEMPLATE,
+    });
+
+    const run = build(ws);
+
+    expect(run.stdout).toContain('"sources" must be an array of strings');
+    expect(run.stdout).toContain('"overrides" must be an array of strings');
+    expect(run.stdout).toContain('"targets" must be an array of strings');
+  });
+
+  test("an array holding a non-string is as fatal as no array at all", () => {
+    const ws = workspace({
+      config: { id: "acme", sources: ["./templates", 3] },
+      repoFiles: TEMPLATE,
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain('"sources" must be an array of strings');
+  });
+
+  test("build --check still exits non-zero while build stays fail-soft", () => {
+    const ws = workspace({
+      config: { id: "acme", sources: "./templates" },
+      repoFiles: TEMPLATE,
+    });
+
+    expect(build(ws).code).toBe(0);
+
+    const checked = build(ws, { check: true });
+
+    expect(checked.code).toBe(1);
+    expect(checked.stdout).toContain('"sources" must be an array of strings');
+  });
+
+  test("init names the key too, alongside its own advice", () => {
+    const ws = workspace({
+      config: { id: "acme", sources: "./templates" },
+      repoFiles: TEMPLATE,
+      git: true,
+    });
+
+    const run = init(ws);
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain('"sources" must be an array of strings');
+    expect(run.stdout).toContain("is invalid; nothing was built");
+    expect(run.stdout).toContain("init needs a config it can read");
+  });
+
+  test("override names the key too", () => {
+    const ws = workspace({
+      config: { id: "acme", sources: "./templates" },
+      repoFiles: TEMPLATE,
+    });
+
+    const run = override(ws, "x", "s");
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain('"sources" must be an array of strings');
+    expect(run.stdout).toContain("is invalid; nothing was built");
+  });
+
+  test("an empty id is fatal and says so specifically", () => {
+    const ws = workspace({
+      config: { id: "", sources: ["./templates"] },
+      repoFiles: TEMPLATE,
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain('"id" must be a non-empty string');
+    expect(exists(ws.repo, ".claude/skills")).toBe(false);
+    expect(build(ws, { check: true }).code).toBe(1);
+  });
+
+  test("a config that is not a JSON object is fatal", () => {
+    const ws = workspace({ config: "[1, 2]\n", repoFiles: TEMPLATE });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("must contain a JSON object");
+  });
+
+  test("unparseable text is fatal and quotes the parser", () => {
+    const ws = workspace({ config: '{ "id" "acme" }\n', repoFiles: TEMPLATE });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("cannot parse");
+    expect(exists(ws.repo, ".claude/skills")).toBe(false);
+  });
+});
+
+describe("blanking JSONC", () => {
+  const CASES = [
+    '// lead\n{\n  /* a\n     b */ "id": "x",\n  "sources": ["t",],\n}\n',
+    '{ "a": "// not a comment", "b": "/* nor this */" }\n',
+    "/* unterminated\n{}\n",
+    '{ "a": 1 } // no trailing newline',
+    '{ "a": "quote \\" then // not a comment" }\n',
+  ];
+
+  for (const text of CASES) {
+    test(`preserves length and line breaks: ${JSON.stringify(text.slice(0, 24))}`, () => {
+      const blanked = blankTrailingCommas(blankJsonComments(text));
+
+      expect(blanked.length).toBe(text.length);
+      expect(blanked.split("\n").length).toBe(text.split("\n").length);
+    });
+  }
+
+  test("a parser's reported offset therefore addresses the original file", () => {
+    const text = '// lead comment here\n{\n  /* block */ "id": "x",\n  "sources" ["t"]\n}\n';
+    const blanked = blankTrailingCommas(blankJsonComments(text));
+
+    expect(blanked.indexOf("[")).toBe(text.indexOf('["t"]'));
+    expect(() => parseJsonc(text)).toThrow();
+  });
+
+  test("comments and a trailing comma still parse away", () => {
+    expect(parseJsonc('// c\n{ "a": [1, 2,], /* b */ "c": 3, }\n')).toEqual({ a: [1, 2], c: 3 });
+  });
+});
+
+describe("unknown config keys", () => {
+  test("are warned about and otherwise ignored", () => {
+    const ws = workspace({
+      config: { id: "acme", sources: ["./templates"], sourcs: ["./typo"] },
+      repoFiles: { "templates/x/SKILL.md.tmpl": "---\nname: x\n---\n\nBody.\n" },
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(hasWarning(run)).toBe(true);
+    expect(run.stdout).toContain('unknown config key "sourcs" ignored');
+    expect(compiled(ws, "x")).toContain("Body.");
+  });
 });

@@ -54,7 +54,9 @@ describe("override — seeding", () => {
     const run = override(ws, "reviewer", "extra-checks");
 
     expect(run.code).toBe(0);
-    expect(read(ws.home, `${HIGHEST}/extra-checks.md`)).toBe("Check for dead code.\nCheck for TODOs.\n");
+    expect(read(ws.home, `${HIGHEST}/extra-checks.md`)).toBe(
+      "Check for dead code.\nCheck for TODOs.\n",
+    );
     expect(run.stdout).toContain(`${HIGHEST}/extra-checks.md`);
     expect(run.stdout).toContain("the template's current default (2 lines)");
   });
@@ -93,7 +95,9 @@ describe("override — seeding", () => {
 
   test("a slot resolving from the template's default says so", () => {
     const ws = reviewerWorkspace();
-    expect(override(ws, "reviewer", "extra-checks").stdout).toContain("resolves    the template's default");
+    expect(override(ws, "reviewer", "extra-checks").stdout).toContain(
+      "resolves    the template's default",
+    );
   });
 
   test("a slot with no default is created empty", () => {
@@ -162,11 +166,18 @@ describe("override — an unedited override changes nothing", () => {
 
   function template(mode: "replace" | "append", defaultLines: string[]): string {
     const open = mode === "append" ? "<!-- slot: s mode=append -->" : "<!-- slot: s -->";
-    const body =
-      defaultLines.length === 0 ? [open] : [open, ...defaultLines, "<!-- /slot -->"];
-    return ["---", "name: solo", "description: One slot.", "---", "", "# Solo", "", ...body, ""].join(
-      "\n",
-    );
+    const body = defaultLines.length === 0 ? [open] : [open, ...defaultLines, "<!-- /slot -->"];
+    return [
+      "---",
+      "name: solo",
+      "description: One slot.",
+      "---",
+      "",
+      "# Solo",
+      "",
+      ...body,
+      "",
+    ].join("\n");
   }
 
   for (const scenario of cases) {
@@ -368,7 +379,12 @@ describe("override — refusals", () => {
 
   test("a config with no usable override root says where it would have written", () => {
     const ws = workspace({
-      config: { id: "acme", sources: ["./templates"], overrides: [], targets: ["./.claude/skills"] },
+      config: {
+        id: "acme",
+        sources: ["./templates"],
+        overrides: [],
+        targets: ["./.claude/skills"],
+      },
       repoFiles: { "templates/reviewer/SKILL.md.tmpl": TEMPLATE },
     });
     const run = override(ws, "reviewer", "intro");

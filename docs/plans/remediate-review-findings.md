@@ -1,4 +1,4 @@
-# Plan: Remediate the 16 findings from the code review
+# Plan: Remediate the 17 findings from the code review
 
 > **Revision 2.** Revision 1 was broken by a four-way adversarial review: it had two proven
 > red-tree breaks, a runtime crash, an unsafe contract change, and 20 wrong citations out of
@@ -7,7 +7,7 @@
 
 ## Objective
 
-A four-agent review found 15 issues; the adversarial review of revision 1 found a 16th. Three
+A four-agent review found 15 issues; the adversarial review of revision 1 found a 16th; confirming that a shared target across repos is an intended use case surfaced a 17th. Three
 cause silent wrong behaviour (a clobbered file, a permanently wedged `--check`, an override
 that stops applying), and one — nothing being committed — means 9,500 lines exist in a single
 unbacked copy. This plan sequences the repairs so the suite is green at every step.
@@ -35,11 +35,54 @@ Two facts drive sequencing:
   illustrative list is never normatively stated. Each draft must also fix the normative
   sentence that currently asserts the old behaviour.
 
+### Confirmed premise: a shared target across repos is intended
+
+The user confirmed (2026-09-04) that installing into `~/.claude/skills` is valid and that several
+repos may act as sources for skills landing there. `tool-contract.md:426-430` already blesses it.
+This is load-bearing for four findings and is why finding 17 exists at all:
+
+- **The build lock does not protect a shared target.** Different repo roots give different state
+  directories and therefore different locks (`build.ts:859`), so two repos building into the home
+  directory are never serialised against each other. Safety there rests entirely on the ownership
+  marker and the per-skill atomic swap. Do not assume the lock covers this.
+- **Finding 10 is reachable, not theoretical** -- the concurrent sweep of another build's parked
+  rollback copy needs exactly this configuration. It stays sequenced last for regression risk,
+  but it is fixed, not deferred.
+- **Finding 14 is a correctness gap, not a coverage gap.** `ownedByThisBuild:834-839` is the guard
+  the spec names as what stops two repos erasing each other, and its no-`id` branch (`:838`) has
+  zero coverage.
+- **Finding 4's threat model is ordinary.** "Anyone who can `mkdir` in the shared target" is the
+  normal environment here, which is why the per-target decline state was chosen over one state
+  per skill.
+- **Finding 11 is a plausible arrangement.** Its only reachable case -- a symlink to a directory
+  whose marker names a skill of the same basename -- is another repo's compiled skill of that
+  name.
+
 ### The 16th finding
 
 **(16)** `src/build.ts:708` — `fs.rmSync(staging, …)` sits **unguarded inside `emitSkill`'s own
 catch arm**, the only reachable unguarded fs call on the per-skill path. A throw there escapes
 to `runBuild`'s per-skill catch and is reported as `skill failed unexpectedly`.
+
+### The 17th finding
+
+**(17) Two repos publishing a compiled skill of the same name into a shared target recompile it
+at every session start, forever.** Repo A's stamp records A's content hash for skill S. Repo B
+overwrites the target's `SKILL.md` with its own content. On A's next run `computeStamp` still
+matches -- A's corpus is unchanged -- but `outputsVerified` (`build.ts:334-353`) re-reads the file,
+gets B's hash, and returns false, so `fresh` is never true: A fully recompiles and overwrites.
+B does the same next session. The two ping-pong indefinitely, each paying a full compile.
+
+`tool-contract.md:430` accepts the collision itself ("last writer wins; the tool does not
+arbitrate that") but is silent on the rebuild loop it causes. Skills with disjoint names are
+unaffected -- a repo only verifies the skills in its own stamp.
+
+**Same shape as finding 4** (a gate that can never close, via `outputsVerified`), which is why it
+is fixed alongside it. **Scope of the fix is deliberately minimal: make the condition audible,
+not arbitrated.** The defect is that a foreign overwrite is indistinguishable from ordinary
+staleness, so the developer sees an unexplained full rebuild every session. Whether the tool
+should additionally stop republishing -- letting the gate close and conceding the name -- is a
+contract question, not an implementer's call. See open question 1.
 
 ### Corrections to the findings themselves
 
@@ -126,6 +169,7 @@ would guard nothing.
 | C6 | none — `test/build.test.ts:589-696` already covers four forged stamp shapes. Re-run after every move; they are the split's canary. | — |
 | C7 | `computeStamp` determinism with an unreadable input | passes. **[adv]** Do **not** `import { computeStamp }` — stage 4 moves it to `stamp.ts`, which would manufacture a second extraction-broken import. Assert through the stamp file's `stamp` field instead. |
 | C8 | per-skill crash containment (`build.ts:167-174`) | **[adv]** needs a **two-site** patch: every fs call on that path is guarded except `rmSync` at `build.ts:708` (finding 16), so make `writeFileSync` throw for skill A's staging file **and** `rmSync` throw for its staging dir. |
+| C9 | two repos, one shared target, same skill name: build A, then build B over it, then build A again. Assert A's third run recompiles rather than gating. **Today it emits no diagnostic explaining why** -- that absence is finding 17. | passes (documents today's silent loop) |
 | C-contain | table test recording today's answers for all four containment predicates at `root`, `root/..foo`, `root/sub`, `root/../sibling` | passes |
 
 **Test pattern for every I/O finding: a pair** — one `skipIf(asRoot)` test using a real `chmod`,
@@ -229,6 +273,10 @@ normatively stated.
   amend `:435-442`, the normative pruning passage.
 - **G** (`:391-393`) — add "and decline, with a warning, when something already in a target is
   not this tool's to replace", so B and C read as instances of a stated rule.
+- **H** (`:430`) -- extend the same-name collision sentence: the tool still does not arbitrate
+  which repo wins, but it **names the collision** when a target holds a compiled skill of this
+  build's name carrying another build's marker, so a permanent rebuild is explained rather than
+  silent. Finding 17.
 - **ADR-0001** — **[adv] revision 1's "no amendment needed" reasoning does not hold.** Decision
   7 delegates only the *Rejected* list, and none of A–G add to it. More importantly, finding 4
   changes *what decision 4's stamp guard verifies*, and ADR Consequences `:93-100` names that
@@ -246,7 +294,7 @@ Then the code:
    :142**); `:115` is the one finding 6 is actually about. The split also reaches
    `resolveIncludePath:169-177`, where it is a **message-quality** bug only — fix the wording,
    do not change control flow. Severity **warning** (`:382`).
-2. **(11) + (4) together, in one commit. [adv]** Revision 1 shipped them separately; between the
+2. **(11) + (4) + (17) together, in one commit. [adv]** Revision 1 shipped them separately; between the
    two commits a symlinked target entry becomes a decline, `outputs[name]` goes `null`,
    `outputsVerified` compares against the symlink's content, never gates, and the build prints a
    new warning **and fully recompiles at every session start** — exactly what the noise
@@ -268,7 +316,14 @@ Then the code:
      verified, preserving `:496-499` ("a record that verifies nothing gates nothing").
      The stamp shape changes, so bump the stamp version and treat an old-format stamp as stale —
      one forced rebuild, which is safe.
-   - Proof: C5's two-run assertion.
+   - **(17)**: while `outputsVerified` is being reworked for per-target outcomes, have it
+     consult the ownership marker. When the output at a target exists but its marker names
+     **another build**, emit a warning naming the colliding owner instead of reporting bare
+     staleness. Do **not** change who wins and do **not** let the foreign content gate --
+     `:496-499` still applies. This module edge is `stamp.ts` -> `ownership.ts`, which the stage 4
+     graph already orders correctly.
+   - Proof: C5's two-run assertion, and C9 gaining an assertion that the third run names the
+     colliding owner.
 3. **(7)** `pruneTarget` warns on non-ENOENT, silent on ENOENT, reusing `discover.ts`'s
    `isMissing` — **do not write a fifth copy**. Purely additive. **[adv]** The sibling arms it
    shares vocabulary with (`build.ts:250-252, 277-284, 289-296`) are inside `discoverSkills` and
@@ -329,8 +384,11 @@ silent, which is what makes it mean something when it appears."
 
 ## Open questions
 
-1. **Is a shared `~/.claude/skills` across concurrent builds real here?** `:430` blesses it and
-   it is the only route by which finding 10 causes real loss. If not, 10 could be deferred.
+1. **Should the tool concede a colliding skill name?** Finding 17 is fixed by making the
+   collision audible; it leaves the rebuild loop in place, because `:430` says the tool does not
+   arbitrate. The alternative -- let the gate close, stop republishing, and concede the name to
+   the last writer -- is cheaper for the developer but means a repo silently stops publishing a
+   skill it still declares. Not decided; the minimal fix does not foreclose it.
 2. **Node floor.** `engines: ">=20"` has never been executed; stage 6's smoke matrix settles it,
    or narrow to `">=22"`. Widening later is non-breaking; narrowing is not.
 3. **Invariant 9** (`:536`) — "every diagnostic names a file, and a line that exists in that

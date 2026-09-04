@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { build, bodyOf, cleanup, compiled, hasError, workspace, write } from "./fixtures/workspace.ts";
+import { build, bodyOf, cleanup, compiled, hasError, workspace } from "./fixtures/workspace.ts";
 
 afterEach(cleanup);
 
 /** The same surrounding prose either side of the slot, so the two forms are directly comparable. */
 function skillWithSlot(name: string, slotLines: string[]): string {
-  return ["---", `name: ${name}`, "---", "", "Before.", "", ...slotLines, "", "After.", ""].join("\n");
+  return ["---", `name: ${name}`, "---", "", "Before.", "", ...slotLines, "", "After.", ""].join(
+    "\n",
+  );
 }
 
 describe("bare and fenced-with-empty-default", () => {

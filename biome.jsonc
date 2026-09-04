@@ -1,0 +1,65 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
+  // This file is .jsonc, not .json, purely so it can carry these comments: Biome emits parse
+  // errors on a `//` in biome.json and then silently falls back to its default configuration.
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    // 100 is where this codebase already wraps: 442 lines in src/ sit in the 91-100 column band
+    // and only 43 in 101-110. Formatting at Biome's default 80 rewrites 2965 lines; at 100, 470.
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      // `preset` is the current key; `recommended: true` is deprecated in 2.x and Biome warns on
+      // it. Verified against the schema above (PresetConfig enum: recommended | all | none).
+      "preset": "recommended",
+      "style": {
+        // Deliberately ON, and deliberately non-blocking for now. Most of these assertions can
+        // be removed properly rather than asserted away, so the rule stays enabled to keep
+        // flagging new ones; `warn` is what stops the outstanding call sites from failing the
+        // build while they are being fixed. Restore to the default `error` severity -- delete
+        // this entry -- once they are gone.
+        "noNonNullAssertion": "warn"
+      },
+      "complexity": {
+        // Off: every hit is bracket access on a `Record<string, unknown>` at a JSON
+        // deserialization boundary (`record["version"]`, `parsed["hooks"]`). The brackets mark
+        // the key as untrusted external input rather than a property of a typed object, and
+        // Biome's own fix for this rule is classified unsafe.
+        "useLiteralKeys": "off"
+      },
+      "suspicious": {
+        // Off: `"${home}/claude/skills"` is this tool's own placeholder syntax, expanded by its
+        // config resolver at runtime. These strings must stay plain strings -- turning them into
+        // template literals, which is what the rule is asking for, would break path resolution.
+        "noTemplateCurlyInString": "off"
+      }
+    }
+  },
+  "assist": {
+    "actions": {
+      "source": {
+        // Off: imports here are grouped semantically (node builtins, then types, then local
+        // modules); this action would flatten every file to one alphabetical list. It is also
+        // reported at error severity, so leaving it on fails `biome check`.
+        "organizeImports": "off"
+      }
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double"
+    }
+  }
+}

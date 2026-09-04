@@ -37,6 +37,31 @@ function fdOf(stream: NodeJS.WriteStream, fallback: number): number {
 }
 
 /**
+ * Anything that can end a line or move a terminal cursor, so one report line can only ever render
+ * as one line. Tab is left alone: it cannot start a new line, and `init`'s diff quotes settings
+ * files that legitimately contain them.
+ */
+const INVISIBLE = /(?!\t)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * **The one place untrusted text is made safe to display, and the reason every report line goes
+ * through here.** A diagnostic quotes template, override and marker text, replays messages read
+ * back from `.composable-skills/stamp`, and names skills after directories on disk — none of
+ * which this tool wrote. The build's stdout is fed to a model as instructions by the
+ * `SessionStart` hook, so a newline in any of that would let borrowed text forge a line that
+ * reads as the tool's own report. Normalising once, at the render, covers every source at once
+ * and cannot be forgotten by a new one.
+ */
+function oneLine(text: string): string {
+  return text.replace(INVISIBLE, (character) => {
+    const code = character.codePointAt(0) ?? 0;
+    if (character === "\n") return "\\n";
+    if (character === "\r") return "\\r";
+    return `\\u${code.toString(16).padStart(4, "0")}`;
+  });
+}
+
+/**
  * The three-channel discipline the contract puts on the tool as a whole, not on any one verb:
  * stdout so the agent can report it, stderr for a human running the command, a file because the
  * first two are frequently unread — and one write where the two streams name the same
@@ -53,7 +78,7 @@ export function formatDiagnostic(entry: Diagnostic): string {
     where.push(`line ${entry.line}`);
   }
   const location = where.length === 0 ? "" : ` [${where.join(" ")}]`;
-  return `composable-skills: ${entry.severity}${location} ${entry.message}`;
+  return oneLine(`composable-skills: ${entry.severity}${location} ${entry.message}`);
 }
 
 /**
@@ -78,7 +103,12 @@ function writeToStreams(text: string): void {
  */
 export function emitLines(lines: string[]): void {
   if (lines.length === 0) return;
-  writeToStreams(`${lines.join("\n")}\n`);
+  writeToStreams(renderLines(lines));
+}
+
+/** The join every channel shares, so a line can never carry a newline of its own into the text. */
+function renderLines(lines: string[]): string {
+  return `${lines.map(oneLine).join("\n")}\n`;
 }
 
 /**
@@ -95,7 +125,7 @@ export function emitReport(
     ...summary.map((line) => `composable-skills: ${line}`),
   ];
   if (lines.length === 0) return;
-  const text = `${lines.join("\n")}\n`;
+  const text = renderLines(lines);
 
   writeToStreams(text);
 

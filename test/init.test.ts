@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import os from "node:os";
 import path from "node:path";
 
-import { HOOK_COMMAND, deriveId, invokesThisTool, unifiedDiff } from "../src/init.ts";
+import { unifiedDiff } from "../src/diff.ts";
+import { deriveId } from "../src/init.ts";
+import { HOOK_COMMAND, invokesThisTool } from "../src/settings.ts";
 import { parseJsonc } from "../src/config.ts";
 import {
   chmod,
@@ -18,6 +20,7 @@ import {
   lines,
   read,
   snapshot,
+  withFsFailures,
   workspace,
   write,
 } from "./fixtures/workspace.ts";
@@ -35,8 +38,11 @@ function settingsOf(ws: { repo: string }): unknown {
 
 /** Every SessionStart command string, so an assertion reads the value rather than its escaping. */
 function commandsOf(settings: unknown): unknown[] {
-  const hooks = (settings as { hooks?: { SessionStart?: { hooks?: { command?: unknown }[] }[] } }).hooks;
-  return (hooks?.SessionStart ?? []).flatMap((group) => (group.hooks ?? []).map((entry) => entry.command));
+  const hooks = (settings as { hooks?: { SessionStart?: { hooks?: { command?: unknown }[] }[] } })
+    .hooks;
+  return (hooks?.SessionStart ?? []).flatMap((group) =>
+    (group.hooks ?? []).map((entry) => entry.command),
+  );
 }
 
 describe("init — diff first", () => {
@@ -182,7 +188,14 @@ describe("init — settings.json merge safety", () => {
         {
           hooks: {
             SessionStart: [
-              { hooks: [{ type: "command", command: "node ./node_modules/composable-skills/dist/cli.js build" }] },
+              {
+                hooks: [
+                  {
+                    type: "command",
+                    command: "node ./node_modules/composable-skills/dist/cli.js build",
+                  },
+                ],
+              },
             ],
           },
         },
@@ -195,7 +208,9 @@ describe("init — settings.json merge safety", () => {
     const run = init(ws, { write: true });
 
     expect(read(ws.repo, ".claude/settings.json")).toBe(before);
-    expect(run.stdout).toContain("already runs this tool at SessionStart under a different command string");
+    expect(run.stdout).toContain(
+      "already runs this tool at SessionStart under a different command string",
+    );
   });
 
   test("malformed: refused, left byte-identical, and the run exits non-zero", () => {
@@ -229,7 +244,9 @@ describe("init — settings.json merge safety", () => {
 
     expect(run.code).toBe(1);
     expect(read(ws.repo, ".claude/settings.json")).toBe(annotated);
-    expect(run.stdout).toContain("contains comments or trailing commas, which a rewrite would delete");
+    expect(run.stdout).toContain(
+      "contains comments or trailing commas, which a rewrite would delete",
+    );
   });
 
   test("a settings file that is not an object is refused", () => {
@@ -261,7 +278,9 @@ describe("init — settings.json merge safety", () => {
   });
 
   test("a SessionStart entry of an unrecognised shape is refused rather than merged over", () => {
-    const ws = freshRepo({ ".claude/settings.json": '{ "hooks": { "SessionStart": ["echo hi"] } }\n' });
+    const ws = freshRepo({
+      ".claude/settings.json": '{ "hooks": { "SessionStart": ["echo hi"] } }\n',
+    });
 
     const run = init(ws, { write: true });
 
@@ -354,7 +373,9 @@ describe("init — the config file", () => {
 
     const ws = freshRepo();
     init(ws, { write: true });
-    expect(read(ws.repo, "composable-skills.jsonc")).toContain("declared and never derived from its path");
+    expect(read(ws.repo, "composable-skills.jsonc")).toContain(
+      "declared and never derived from its path",
+    );
   });
 
   test("a config that cannot be parsed stops the run before anything is written", () => {
@@ -433,7 +454,9 @@ describe("init — a directory that is not a checkout", () => {
     const run = init(ws);
 
     expect(hasWarning(run)).toBe(true);
-    expect(run.stdout).toContain(`no .git was found at or above ${ws.repo}, so this is not a checkout`);
+    expect(run.stdout).toContain(
+      `no .git was found at or above ${ws.repo}, so this is not a checkout`,
+    );
     expect(run.stdout).toContain("Check it is the one you meant before applying this.");
     // A warning, not a refusal — `init` writes only inside that directory either way.
     expect(run.code).toBe(0);
@@ -474,7 +497,9 @@ describe("init — Yarn PnP", () => {
     const run = init(ws, { write: true });
 
     expect(run.code).toBe(1);
-    expect(run.stdout).toContain(`${path.join(ws.repo, ".pnp.js")} exists, so this repo uses Yarn Plug'n'Play`);
+    expect(run.stdout).toContain(
+      `${path.join(ws.repo, ".pnp.js")} exists, so this repo uses Yarn Plug'n'Play`,
+    );
     expect(exists(ws.repo, "composable-skills.jsonc")).toBe(false);
   });
 
@@ -592,7 +617,9 @@ describe("invokesThisTool — the invoked program, never the name", () => {
   test("matches a real invocation, however the path is spelled", () => {
     expect(invokesThisTool(HOOK_COMMAND)).toBe(true);
     expect(invokesThisTool("node ./node_modules/composable-skills/dist/cli.js build")).toBe(true);
-    expect(invokesThisTool("node /opt/app/node_modules/composable-skills/dist/cli.js build")).toBe(true);
+    expect(invokesThisTool("node /opt/app/node_modules/composable-skills/dist/cli.js build")).toBe(
+      true,
+    );
     expect(invokesThisTool("node node_modules\\composable-skills\\dist\\cli.js build")).toBe(true);
     expect(invokesThisTool("composable-skills build")).toBe(true);
     expect(invokesThisTool("npx composable-skills build")).toBe(true);
@@ -607,7 +634,9 @@ describe("invokesThisTool — the invoked program, never the name", () => {
 
   test("does not match a path that merely lives under a directory of that name", () => {
     expect(invokesThisTool("cd /home/me/dev/composable-skills && npm run build")).toBe(false);
-    expect(invokesThisTool("bash -c 'cd /home/me/dev/composable-skills && bun run build'")).toBe(false);
+    expect(invokesThisTool("bash -c 'cd /home/me/dev/composable-skills && bun run build'")).toBe(
+      false,
+    );
     expect(invokesThisTool("cat /home/me/dev/composable-skills/README.md")).toBe(false);
   });
 
@@ -627,9 +656,7 @@ describe("init — a foreign hook that already runs this tool", () => {
   const THEIRS = `${JSON.stringify(
     {
       hooks: {
-        SessionStart: [
-          { hooks: [{ type: "command", command: "npx composable-skills build" }] },
-        ],
+        SessionStart: [{ hooks: [{ type: "command", command: "npx composable-skills build" }] }],
       },
     },
     null,
@@ -778,7 +805,9 @@ describe("init — a mode is a decision about a file", () => {
     expect(dry.stdout).toContain(
       `${path.join(ws.repo, ".claude", "settings.json")} is not writable (mode 444)`,
     );
-    expect(dry.stdout).toContain("refused  .claude/settings.json — not writable — left exactly as it is");
+    expect(dry.stdout).toContain(
+      "refused  .claude/settings.json — not writable — left exactly as it is",
+    );
     expect(dry.stdout).not.toContain("would update  .claude/settings.json");
   });
 
@@ -793,6 +822,166 @@ describe("init — a mode is a decision about a file", () => {
     expect(modeOf(ws.repo, ".claude/settings.json")).toBe(0o444);
     // The steps that are writable still apply — the refusal is that file's, not the run's.
     expect(exists(ws.repo, "composable-skills.jsonc")).toBe(true);
+  });
+});
+
+const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+/**
+ * Mode 000, which is a different file from the mode 444 above: that one can be read, so the plan
+ * can at least see what it is proposing to replace. This one cannot, and a read that fails is not
+ * a file that is absent — treating the two alike had `init` report `created` for a `.gitignore`
+ * it had just destroyed, over a diff showing nothing but `+` lines.
+ */
+describe("init — a file that exists but cannot be read", () => {
+  const GITIGNORE = "node_modules/\ndist/\n*.log\n";
+  const SETTINGS = `${JSON.stringify({ model: "opus" }, null, 2)}\n`;
+
+  test.skipIf(asRoot)("the dry run calls an unreadable .gitignore refused, not created", () => {
+    const ws = freshRepo({ ".gitignore": GITIGNORE });
+    // No `finally` restoring the mode: `chmod()` records the path and `cleanup()` reopens it.
+    chmod(ws.repo, ".gitignore", 0o000);
+
+    const dry = init(ws);
+
+    expect(dry.code).toBe(1);
+    expect(dry.stdout).toContain("refused  .gitignore — exists but could not be read");
+    expect(dry.stdout).not.toContain("create  .gitignore");
+    expect(exists(ws.repo, "composable-skills.jsonc")).toBe(false);
+  });
+
+  test.skipIf(asRoot)("and --write leaves its bytes exactly as they were", () => {
+    const ws = freshRepo({ ".gitignore": GITIGNORE });
+    chmod(ws.repo, ".gitignore", 0o000);
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain(
+      `${path.join(ws.repo, ".gitignore")} exists but could not be read`,
+    );
+    chmod(ws.repo, ".gitignore", 0o600);
+    expect(read(ws.repo, ".gitignore")).toBe(GITIGNORE);
+  });
+
+  // The same claim under an injected read failure, so it still runs where a root CI makes `chmod`
+  // meaningless. `fired` is asserted so a predicate that never matched cannot leave this hollow.
+  test("an unreadable .gitignore is refused rather than replaced", () => {
+    const ws = freshRepo({ ".gitignore": GITIGNORE });
+    const target = path.join(ws.repo, ".gitignore");
+
+    const { result: run, fired } = withFsFailures(
+      { calls: ["readFileSync"], when: target, code: "EACCES" },
+      () => init(ws, { write: true }),
+    );
+
+    expect(fired).toContain(`readFileSync ${target}`);
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain(`${target} exists but could not be read`);
+    expect(run.stdout).toContain("init will not replace a file it has not seen");
+    expect(run.stdout).not.toContain("create  .gitignore");
+    expect(read(ws.repo, ".gitignore")).toBe(GITIGNORE);
+  });
+
+  test.skipIf(asRoot)("an unreadable .claude/settings.json is refused, not merged over", () => {
+    const ws = freshRepo({ ".claude/settings.json": SETTINGS });
+    chmod(ws.repo, ".claude/settings.json", 0o000);
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain(
+      `${path.join(ws.repo, ".claude", "settings.json")} exists but could not be read`,
+    );
+    chmod(ws.repo, ".claude/settings.json", 0o600);
+    // Every unrelated key is preserved, which a rewrite of a file nobody read cannot promise.
+    expect(read(ws.repo, ".claude/settings.json")).toBe(SETTINGS);
+  });
+
+  test("the same settings file under an injected read failure keeps its bytes", () => {
+    const ws = freshRepo({ ".claude/settings.json": SETTINGS });
+    const target = path.join(ws.repo, ".claude", "settings.json");
+
+    const { result: run, fired } = withFsFailures({ calls: ["readFileSync"], when: target }, () =>
+      init(ws, { write: true }),
+    );
+
+    expect(fired).toContain(`readFileSync ${target}`);
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain(`${target} exists but could not be read`);
+    expect(read(ws.repo, ".claude/settings.json")).toBe(SETTINGS);
+  });
+
+  test("and its dry run prints the refusal rather than a creation", () => {
+    const ws = freshRepo({ ".claude/settings.json": SETTINGS });
+    const target = path.join(ws.repo, ".claude", "settings.json");
+    const before = snapshot(ws.root);
+
+    const { result: dry, fired } = withFsFailures({ calls: ["readFileSync"], when: target }, () =>
+      init(ws),
+    );
+
+    expect(fired).toContain(`readFileSync ${target}`);
+    expect(dry.code).toBe(1);
+    expect(dry.stdout).toContain("refused  .claude/settings.json — exists but could not be read");
+    expect(dry.stdout).not.toContain("create  .claude/settings.json");
+    expect(snapshot(ws.root)).toEqual(before);
+  });
+
+  test("a dangling symlink keeps the symlink verdict rather than this one", () => {
+    const ws = freshRepo();
+    symlink(path.join(ws.root, "nowhere"), ws.repo, ".gitignore");
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain("is a symlink, so writing");
+    expect(run.stdout).not.toContain("exists but could not be read");
+    expect(exists(ws.root, "nowhere")).toBe(false);
+  });
+
+  /**
+   * The two files `init` reads and never writes are the opposite case: there is nothing there to
+   * refuse on behalf of, and a refusal would stop a run over a file this tool has no claim on. It
+   * warns instead, because an unchecked merge source is exactly what builds twice every session.
+   */
+  test.skipIf(asRoot)("an unreadable settings.local.json warns, and the run still succeeds", () => {
+    const ws = freshRepo({ ".claude/settings.local.json": SETTINGS });
+    chmod(ws.repo, ".claude/settings.local.json", 0o000);
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(run.stdout).toContain(
+      `${path.join(ws.repo, ".claude", "settings.local.json")} — this repo's untracked personal ` +
+        "settings — exists but could not be read",
+    );
+    expect(run.stdout).toContain("could not check whether a hook there already runs this tool");
+    expect(commandsOf(settingsOf(ws))).toEqual([HOOK_COMMAND]);
+  });
+
+  test("an unreadable user-level settings file warns too, and does not refuse", () => {
+    const ws = workspace({
+      config: null,
+      git: true,
+      osHomeFiles: { ".claude/settings.json": SETTINGS },
+    });
+    const target = path.join(ws.osHome, ".claude", "settings.json");
+
+    const { result: run, fired } = withFsFailures({ calls: ["readFileSync"], when: target }, () =>
+      init(ws, { write: true }),
+    );
+
+    expect(fired).toContain(`readFileSync ${target}`);
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(hasWarning(run)).toBe(true);
+    expect(run.stdout).toContain(
+      `${target} — your user-level settings — exists but could not be read`,
+    );
+    expect(run.stdout).toContain("init never writes that file either way.");
+    expect(commandsOf(settingsOf(ws))).toEqual([HOOK_COMMAND]);
   });
 });
 
@@ -924,7 +1113,8 @@ describe("init — the config survives its own invitation", () => {
   });
 
   for (const which of [[], [0], [1], [0, 1]]) {
-    const label = which.length === 0 ? "as written" : `with line(s) ${which.join(" and ")} uncommented`;
+    const label =
+      which.length === 0 ? "as written" : `with line(s) ${which.join(" and ")} uncommented`;
     test(`${label}, the config still parses and still loads`, () => {
       const ws = freshRepo();
       init(ws, { write: true });

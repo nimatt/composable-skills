@@ -1,14 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import path from "node:path";
 
+import type { FsFailure } from "./fixtures/workspace.ts";
 import {
   build,
+  chmod,
   cleanup,
   compiled,
   exists,
   frontmatterOf,
   hasError,
-  read,
   remove,
+  withFsFailures,
   workspace,
   write,
 } from "./fixtures/workspace.ts";
@@ -273,7 +276,8 @@ describe("include", () => {
     const ws = workspace({
       repoFiles: {
         "templates/fragments/hard-rules.md": "Rule one.\n",
-        "templates/inc/SKILL.md.tmpl": "---\nname: inc\n---\n\n<!-- include: fragments/hard-rules.md -->\n",
+        "templates/inc/SKILL.md.tmpl":
+          "---\nname: inc\n---\n\n<!-- include: fragments/hard-rules.md -->\n",
       },
     });
 
@@ -334,5 +338,147 @@ describe("no variable substitution", () => {
     // nothing resembling a resolved path leaked in
     expect(compiled(ws, "verbatim")).not.toContain(ws.home);
     expect(compiled(ws, "verbatim")).not.toContain("acme");
+  });
+});
+
+/**
+ * An override root or file that exists but cannot be read used to collapse into the same verdict
+ * as one that is absent, so the slot reverted to the template default with nothing printed. The
+ * condition is warned, not fatal — a `chmod` in a personal, untracked directory must not fail a
+ * `--check` on a CI runner that does not even have that directory.
+ */
+describe("an unreadable override root", () => {
+  const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+  /** `repos/acme` is overrides[2]; `.claude/skills-local` below it holds the same slot. */
+  const unreadableRoot = (ws: { home: string }) => path.join(ws.home, "repos", "acme");
+
+  /** The override file the highest-precedence root would fill `extra-checks` from. */
+  const overrideFile = (ws: { home: string }) =>
+    path.join(unreadableRoot(ws), "reviewer", "extra-checks.md");
+
+  function expectFellThroughToTheLowerRoot(ws: Parameters<typeof compiled>[0]): void {
+    const out = compiled(ws, "reviewer");
+    // The next root down still wins the slot the unreadable root would have filled ...
+    expect(out).toContain("LOCAL checks.");
+    expect(out).not.toContain("REPO checks.");
+    // ... the lowest root still wins the slot only it declares ...
+    expect(out).toContain("Global intro.");
+    // ... and a slot no root fills still comes from the template.
+    expect(out).toContain("Nothing overrides this.");
+  }
+
+  /**
+   * The two unreadable kinds share a message prefix — `"cannot read override root"` starts with
+   * `"cannot read override"` — so a test that asserts only the shorter string passes on either.
+   * Every test below says which kind it means, or the pairs stop distinguishing anything.
+   */
+  function expectPerComponentKind(run: { stdout: string }, file: string): void {
+    expect(run.stdout).toContain(`warning [reviewer ${file}] cannot read override: `);
+    expect(run.stdout).not.toContain("cannot read override root");
+  }
+
+  function expectRootKind(run: { stdout: string }, root: string): void {
+    expect(run.stdout).toContain(`cannot read override root ${root}: `);
+  }
+
+  test.skipIf(asRoot)("warns, naming the path, and keeps scanning the lower roots", () => {
+    const ws = acceptanceWorkspace();
+    // No `finally` restoring the mode: `chmod()` records the path and `cleanup()` reopens it.
+    // The root itself still `lstat`s and `realpath`s — only the components under it are shut,
+    // so this is the per-component `unreadable` kind, not `root-unreadable`.
+    chmod(ws.home, "repos/acme", 0o000);
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(run.stdout).toContain("composable-skills: warning");
+    expectPerComponentKind(run, overrideFile(ws));
+    expect(run.stdout).toContain(unreadableRoot(ws));
+    expectFellThroughToTheLowerRoot(ws);
+  });
+
+  // The same claim under an injected failure, so it still runs where a root CI makes `chmod`
+  // meaningless. `lstatSync` is the call `resolveContainedFile` walks the root's components with,
+  // and the predicate deliberately spares the root itself: the first `lstat` that call issues is
+  // on the root, so matching it too would divert this into the `root-unreadable` arm below and
+  // leave the per-component arm with no always-running test at all.
+  test("a component under an override root warns under an injected lstat failure too", () => {
+    const ws = acceptanceWorkspace();
+    const root = unreadableRoot(ws);
+    const failure: FsFailure = {
+      calls: ["lstatSync"],
+      when: (target) => target.startsWith(`${root}${path.sep}`),
+      code: "EACCES",
+    };
+
+    const { result: run, fired } = withFsFailures(failure, () => build(ws));
+
+    expect(fired.length).toBeGreaterThan(0);
+    expect(fired.every((entry) => entry.startsWith("lstatSync "))).toBe(true);
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(run.stdout).toContain("composable-skills: warning");
+    expectPerComponentKind(run, overrideFile(ws));
+    expectFellThroughToTheLowerRoot(ws);
+  });
+
+  test.skipIf(asRoot)("an override root whose parent cannot be searched warns as well", () => {
+    const ws = acceptanceWorkspace();
+    chmod(ws.home, "repos", 0o000);
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("composable-skills: warning");
+    expectRootKind(run, unreadableRoot(ws));
+    expectFellThroughToTheLowerRoot(ws);
+  });
+
+  // The always-running half of the test above, for the same reason.
+  test("an unreadable override root itself warns under an injected lstat failure too", () => {
+    const ws = acceptanceWorkspace();
+    const root = unreadableRoot(ws);
+    const failure: FsFailure = {
+      calls: ["lstatSync"],
+      when: root,
+      code: "EACCES",
+    };
+
+    const { result: run, fired } = withFsFailures(failure, () => build(ws));
+
+    expect(fired.length).toBeGreaterThan(0);
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(run.stdout).toContain("composable-skills: warning");
+    expectRootKind(run, root);
+    expectFellThroughToTheLowerRoot(ws);
+  });
+
+  /**
+   * The headline case: the root and every component of it resolve, and the override *file* is the
+   * thing that cannot be read. Nothing above reaches this — all four fail inside
+   * `resolveContainedFile`, before the file is ever opened — so without this the `readFileSync`
+   * arm could be reduced to a bare `continue`, restoring the silent fall-through, unnoticed.
+   */
+  test("an override file that resolves but cannot be read warns and falls through", () => {
+    const ws = acceptanceWorkspace();
+    const file = overrideFile(ws);
+    const failure: FsFailure = {
+      calls: ["readFileSync"],
+      when: file,
+      code: "EACCES",
+    };
+
+    const { result: run, fired } = withFsFailures(failure, () => build(ws));
+
+    expect(fired.length).toBeGreaterThan(0);
+    expect(fired.every((entry) => entry === `readFileSync ${file}`)).toBe(true);
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(run.stdout).toContain("composable-skills: warning");
+    expectPerComponentKind(run, file);
+    expectFellThroughToTheLowerRoot(ws);
   });
 });

@@ -94,7 +94,9 @@ describe("cli — a contradiction is an error, and only a contradiction", () => 
     const run = cli(ws, ["override", "reviewer", "extra-checks", "--write", "--dry-run"]);
 
     expect(run.code).toBe(2);
-    expect(run.stderr).toContain("composable-skills: override cannot take both --write and --dry-run");
+    expect(run.stderr).toContain(
+      "composable-skills: override cannot take both --write and --dry-run",
+    );
     expect(exists(ws.home, "repos/acme/reviewer/extra-checks.md")).toBe(false);
   });
 

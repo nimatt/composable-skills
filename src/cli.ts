@@ -81,8 +81,8 @@ export function main(argv: string[]): number {
   }
 
   if (verb === "build") {
-    const unknown = rest.filter((flag) => flag !== "--check");
-    if (unknown.length > 0) return usageError(`unknown option "${unknown[0]!}"`);
+    const [unknownFlag] = rest.filter((flag) => flag !== "--check");
+    if (unknownFlag !== undefined) return usageError(`unknown option "${unknownFlag}"`);
     const check = rest.includes("--check");
     try {
       return runBuild({ check });
@@ -93,9 +93,11 @@ export function main(argv: string[]): number {
   }
 
   if (verb === "init") {
-    const unknown = rest.filter((argument) => argument !== "--write" && argument !== "--dry-run");
-    if (unknown.length > 0) {
-      return usageError(`init takes only --write or --dry-run, not "${unknown[0]!}"`);
+    const [unknownArgument] = rest.filter(
+      (argument) => argument !== "--write" && argument !== "--dry-run",
+    );
+    if (unknownArgument !== undefined) {
+      return usageError(`init takes only --write or --dry-run, not "${unknownArgument}"`);
     }
     const write = resolveWrite("init", rest, false);
     if (typeof write === "number") return write;
@@ -110,19 +112,16 @@ export function main(argv: string[]): number {
   if (verb === "override") {
     const flags = rest.filter((argument) => argument.startsWith("-"));
     const positional = rest.filter((argument) => !argument.startsWith("-"));
-    const unknown = flags.filter((flag) => flag !== "--dry-run" && flag !== "--write");
-    if (unknown.length > 0) return usageError(`unknown option "${unknown[0]!}"`);
-    if (positional.length !== 2) {
+    const [unknownFlag] = flags.filter((flag) => flag !== "--dry-run" && flag !== "--write");
+    if (unknownFlag !== undefined) return usageError(`unknown option "${unknownFlag}"`);
+    const [skill, slot, extra] = positional;
+    if (skill === undefined || slot === undefined || extra !== undefined) {
       return usageError("override takes exactly two arguments: <skill> <slot>");
     }
     const write = resolveWrite("override", flags, true);
     if (typeof write === "number") return write;
     try {
-      return runOverride({
-        skill: positional[0]!,
-        slot: positional[1]!,
-        dryRun: !write,
-      });
+      return runOverride({ skill, slot, dryRun: !write });
     } catch (cause) {
       reportCrash(`override failed: ${describe(cause)}`);
       return 1;
@@ -131,7 +130,9 @@ export function main(argv: string[]): number {
 
   const phase = PLANNED[verb];
   if (phase !== undefined) {
-    process.stderr.write(`composable-skills: ${verb} is not implemented yet (planned for phase ${phase})\n`);
+    process.stderr.write(
+      `composable-skills: ${verb} is not implemented yet (planned for phase ${phase})\n`,
+    );
     return 1;
   }
 

@@ -4,7 +4,9 @@ import path from "node:path";
 import type { Config, Diagnostic, Root, SlotBlock, SlotResolution, SourceLine } from "./types.ts";
 import { describe, error } from "./types.ts";
 import { loadConfig } from "./config.ts";
-import { compileSkill, discoverSkills } from "./build.ts";
+import { isAtOrUnder } from "./contain.ts";
+import { compileSkill } from "./compile.ts";
+import { discoverSkills } from "./discover.ts";
 import { emitLines, emitReport } from "./report.ts";
 
 export interface OverrideOptions {
@@ -21,7 +23,7 @@ export function runOverride(options: OverrideOptions): number {
   const dryRun = options.dryRun ?? false;
   const loaded = loadConfig(cwd, options.env ?? process.env);
   if ("fatal" in loaded) {
-    emitReport([error(loaded.fatal)], [], null);
+    emitReport([...loaded.diagnostics, error(loaded.fatal)], [], null);
     return 1;
   }
 
@@ -32,7 +34,14 @@ export function runOverride(options: OverrideOptions): number {
   diagnostics.push(...discovery.diagnostics);
   const skill = discovery.skills.find((candidate) => candidate.name === options.skill);
   if (skill === undefined) {
-    diagnostics.push(error(unknownSkillMessage(options.skill, discovery.skills.map((s) => s.name))));
+    diagnostics.push(
+      error(
+        unknownSkillMessage(
+          options.skill,
+          discovery.skills.map((s) => s.name),
+        ),
+      ),
+    );
     emitReport(diagnostics, [], null);
     return 1;
   }
@@ -58,10 +67,17 @@ export function runOverride(options: OverrideOptions): number {
   const block = result.slots.find((candidate) => candidate.name === options.slot);
   if (block === undefined) {
     diagnostics.push(
-      error(unknownSlotMessage(skill.name, options.slot, result.slots.map((s) => s.name)), {
-        skill: skill.name,
-        file: skill.templatePath,
-      }),
+      error(
+        unknownSlotMessage(
+          skill.name,
+          options.slot,
+          result.slots.map((s) => s.name),
+        ),
+        {
+          skill: skill.name,
+          file: skill.templatePath,
+        },
+      ),
     );
     emitReport(diagnostics, [], null);
     return 1;
@@ -119,7 +135,7 @@ export function runOverride(options: OverrideOptions): number {
    * in the repo, where git will offer it to the whole team. The only other signal is a config
    * warning that a *root* was skipped, which says nothing about where this file went.
    */
-  if (insideRepo(config.repoRoot, root.path)) {
+  if (isAtOrUnder(config.repoRoot, root.path)) {
     lines.push(
       "",
       "  This root is inside the repo, so the file lands in the working tree and git will see it",
@@ -224,14 +240,6 @@ function noOverrideRootMessage(config: Config): string {
       ? ' (the default `${home}/repos/${id}` root is inert until the config declares an "id")'
       : "";
   return `no usable override root is configured, so there is nowhere to write${why}`;
-}
-
-/** Text-level containment, the same test `config.ts` applies to a `${home}` entry. */
-function insideRepo(repoRoot: string, candidate: string): boolean {
-  const relative = path.relative(repoRoot, candidate);
-  if (relative === "") return true;
-  if (path.isAbsolute(relative)) return false;
-  return relative !== ".." && !relative.startsWith(`..${path.sep}`);
 }
 
 function exists(candidate: string): boolean {

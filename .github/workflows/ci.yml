@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Every job here runs directly on `ubuntu-latest`, never under `jobs.<id>.container:`.
+# A container runs as root, and the suite branches on that: `test/build.test.ts` computes
+# `asRoot` from `process.getuid() === 0` and pairs it with `skipIf(asRoot)` on the tests that
+# assert a permission is actually refused. Under root those permissions are never refused, so
+# the tests would silently skip -- and a skip is invisible in a "0 failed" summary, so the
+# interesting half of the suite would disappear without anyone noticing. The `ubuntu-latest`
+# runner executes as the non-root `runner` user, which is what those tests need.
+# Do not add `container:` to any job in this file.
+
+jobs:
+  check:
+    # Bun only. The suite imports `bun:test` and imports `../../src/build.ts` with a `.ts`
+    # extension, so node cannot run it at all -- there is no node matrix to add here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint and format check
+        run: bun run lint
+
+      - name: Test
+        run: bun test
+
+  smoke:
+    # Turns `engines: ">=20"` from an untested assertion into a checked fact. Loading the built
+    # bundle is exactly where a syntax error or an API below the floor surfaces, so running the
+    # two no-op verbs on each supported node is enough to catch it.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      - name: Run the built CLI on node ${{ matrix.node }}
+        run: |
+          node dist/cli.js --version
+          node dist/cli.js --help

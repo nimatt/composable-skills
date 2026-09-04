@@ -214,9 +214,10 @@ merge-conflict markers in any compiled input — a template, an included fragmen
 file — duplicate slot names, and a source skill directory supplying a `SKILL.md` or an ownership
 marker of its own (whatever the case). Warnings are more numerous and less interesting; among
 them are an override file matching no declared slot, an unsupported frontmatter field, a skill
-name colliding across sources, a symlink that was not copied, and a directory the build declined
-to overwrite because nothing marked it as this tool's. A developer's typo never breaks the
-build; a conflict marker reaching the model always does.
+name colliding across sources, a symlink that was not copied, and an entry in a target the build
+declined to overwrite because it was not this tool's to replace — a directory nothing marked as
+this tool's, or a symlink, which is never rewritten and never read through. A developer's typo
+never breaks the build; a conflict marker reaching the model always does.
 
 Isolation has one limit: **a config the tool cannot read is fatal to the whole run.** An
 unreadable or unparseable config file, one that does not hold a JSON object, an `id` that is not

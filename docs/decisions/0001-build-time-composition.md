@@ -99,6 +99,26 @@ session forever, and because its entire job is writing into `.claude/`, it has n
 signature. Mitigation is limited to the guards in decision 4 and to the fact that the tool is a
 dependency teams audit like any other.
 
+**Amendment (2026-09-04): decision 4's stamp guard verifies per-target outcomes.** The guard
+named above records, for each skill and each target separately, either a content hash of the
+`SKILL.md` written there or a decline where the target held something that was not this tool's to
+replace; it previously folded one boolean across every target into a single hash per skill. This
+is a strengthening rather than a relaxation. One state per skill cannot represent *written in
+target A, declined in target B*, and resolving that pair to *declined* would have dropped the
+integrity check from a compiled skill that really exists — arrangeable by anyone able to create a
+directory in a shared target such as `~/.claude/skills`, which decision 3 supports as a
+non-default. A still-standing decline is not a gap in that check: re-reading one asks whether a
+non-owned entry is still at the path, which confirms the record and counts as verification done,
+the same way a re-read hash that still matches does — so a corpus whose every skill is declined
+gates. The floor was never that *some* skill verifies, and no such floor is a trust boundary:
+whoever can write the stamp can equally plant a `SKILL.md` in a target and record *its* hash as
+written, which re-reads, matches and gates. What the per-target change leaves untouched is the
+narrower property this mitigation rests on — **a record naming no path to go and look at gates
+nothing**, a `failed` list or an empty per-target map being exactly that — and the guard's job,
+which is correctness against ordinary staleness and detectability, not defence against an actor
+who can already write the state directory. The enumerated behaviour is in
+[the spec's *`SessionStart` hook*](../specs/tool-contract.md#the-sessionstart-hook).
+
 **A fresh clone has no skills until the first build.** Claude Code does not watch a top-level
 skills directory that did not exist at session start, so the first session after a clone
 silently has none. Judged minor because clones are rare, and **narrowed by a notice rather than

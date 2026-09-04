@@ -16,6 +16,8 @@ export function normaliseEolBytes(input: Buffer): Buffer {
   const out = Buffer.allocUnsafe(raw.length);
   let n = 0;
   for (let i = 0; i < raw.length; i++) {
+    // Runs once per byte of every file the stamp hashes.
+    // biome-ignore lint/style/noNonNullAssertion: hot path — `.entries()` allocates per iteration
     const byte = raw[i]!;
     if (byte === CR) {
       if (raw[i + 1] === LF) continue;
