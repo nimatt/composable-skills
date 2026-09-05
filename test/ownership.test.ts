@@ -34,7 +34,9 @@ function markerOf(root: string, rel: string): unknown {
  * block elsewhere in the suite declares `id: "acme"`, so the identity comparison those tests
  * exercise is always the `id` one; these pin the other half. It is the guard on the tool's only
  * destructive operation, and the spec states the repo-root reading as a live configuration
- * (`docs/specs/tool-contract.md:431-433`), not a curiosity.
+ * (`docs/specs/tool-contract.md`, *Ownership and pruning*, "A build identifies itself by `id`"),
+ * not a curiosity. Cited by heading rather than by line: the previous citation named lines that
+ * had since become a different paragraph entirely.
  */
 describe("a build that identifies itself by repo root", () => {
   /**
@@ -75,9 +77,9 @@ describe("a build that identifies itself by repo root", () => {
     expect(targetEntries(ws.repo)).toEqual(["keep"]);
   });
 
-  // Pins current behaviour, and the spec's stated consequence at tool-contract.md:431-433: with no
-  // `id`, a second checkout writing to the same target does not recognise the first checkout's
-  // output as its own, so it declines to prune it. The conservative direction.
+  // Pins current behaviour, and the consequence the spec states under *Ownership and pruning*:
+  // with no `id`, a second checkout writing to the same target does not recognise the first
+  // checkout's output as its own, so it declines to prune it. The conservative direction.
   test("a config with no id does not prune another checkout's output", () => {
     const otherCheckout = "/somewhere/else/main-checkout";
     const ws = workspace({

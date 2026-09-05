@@ -6,6 +6,7 @@ import { unifiedDiff } from "../src/diff.ts";
 import { deriveId } from "../src/init.ts";
 import { HOOK_COMMAND, invokesThisTool } from "../src/settings.ts";
 import { parseJsonc } from "../src/config.ts";
+import type { BuildRun } from "./fixtures/workspace.ts";
 import {
   chmod,
   cleanup,
@@ -30,6 +31,22 @@ afterEach(cleanup);
 /** A repo `init` has never touched: a git checkout with no config of ours in it. */
 function freshRepo(repoFiles: Record<string, string> = {}) {
   return workspace({ config: null, git: true, repoFiles });
+}
+
+/**
+ * The directory the `sources` entry `init` scaffolds points at. A fresh repo does not have it, and
+ * the plan's "### 2 — A source the tool cannot use is an error" makes a source root that is not
+ * there an error rather than a warning — deliberately, since the config does name something that
+ * is not there, and deliberately not papered over in `init`, since scaffolding the directory would
+ * presume a layout on behalf of a repo that may be about to name a package. So a test here either
+ * names that error ("the config it writes is one the tool can load") or creates the directory,
+ * when the error is not what the test is about.
+ */
+const SCAFFOLDED_SOURCE_REL = "skills/templates";
+
+/** Every error line, so a test can name the error it expects rather than assert there are none. */
+function errorsOf(run: BuildRun): string[] {
+  return lines(run).filter((line) => line.startsWith("composable-skills: error"));
 }
 
 function settingsOf(ws: { repo: string }): unknown {
@@ -92,13 +109,45 @@ describe("init — diff first", () => {
     expect(second.stdout).toContain("Nothing to do — this repo is already wired up.");
   });
 
+  /**
+   * The config still loads — a config `init` cannot read is fatal, and this run exits 0 and reports
+   * the file as already there. What it is not is diagnostic-free: the `sources` entry `init` writes
+   * names a directory a fresh repo does not have yet, and that is an error by design (see
+   * `SCAFFOLDED_SOURCE_REL`). It ends the moment the first template is added. Naming that one error
+   * rather than asserting there are none keeps every *other* error a failure here.
+   */
   test("the config it writes is one the tool can load", () => {
     const ws = freshRepo();
     init(ws, { write: true });
     const reloaded = init(ws);
 
-    expect(hasError(reloaded)).toBe(false);
+    expect(reloaded.code).toBe(0);
+    expect(errorsOf(reloaded)).toEqual([
+      'composable-skills: error source root "./skills/templates" does not exist at ' +
+        `${path.join(ws.repo, SCAFFOLDED_SOURCE_REL)} — skipped; create it, or point "sources" ` +
+        "at an installed package",
+    ]);
+    expect(reloaded.stdout).toContain("a config already exists — left exactly as it is");
     expect(read(ws.repo, "composable-skills.jsonc")).toContain('"id": "repo"');
+  });
+
+  /**
+   * The config's own account of what it just scaffolded has to match the error above it. Saying
+   * only that "nothing compiles until" the directory exists describes silence, and what a fresh
+   * repo actually gets is an `error` line on every build and a non-zero `build --check` — the
+   * first thing a developer wiring this into CI meets. The template states it rather than
+   * apologising for it.
+   */
+  test("the config it writes says the scaffolded source errors until it exists", () => {
+    const ws = freshRepo();
+    init(ws, { write: true });
+    // Unwrapped, so the assertion is about the sentence rather than about where it breaks.
+    const commentary = read(ws.repo, "composable-skills.jsonc").replaceAll(/\n\s*\/\/ ?/g, " ");
+
+    expect(commentary).toContain(
+      "Until the directory exists at all, every build reports it as an error and build --check " +
+        "exits non-zero: create it, or repoint this entry at an installed package.",
+    );
   });
 });
 
@@ -1085,6 +1134,12 @@ describe("init — the settings files it reads but never writes", () => {
  * The config `init` writes invites the developer to uncomment two lines. Doing so used to produce
  * `Expected ',' or '}'` — a fatal config, which exits 0 under the session hook and reaches only
  * `.composable-skills/build.log`, the channel that exists because nobody reads it.
+ *
+ * What is under test here is the invited lines, not the scaffolded `sources` entry, so these
+ * fixtures create `SCAFFOLDED_SOURCE_REL` — the steady state of a repo that has added its first
+ * template. That keeps `hasError` a live assertion about uncommenting: without the directory every
+ * one of these would report the error described at `SCAFFOLDED_SOURCE_REL` no matter what the
+ * uncommented lines did, and an error introduced by an invited line would hide inside it.
  */
 describe("init — the config survives its own invitation", () => {
   function uncomment(text: string, which: number[]): string {
@@ -1117,6 +1172,7 @@ describe("init — the config survives its own invitation", () => {
       which.length === 0 ? "as written" : `with line(s) ${which.join(" and ")} uncommented`;
     test(`${label}, the config still parses and still loads`, () => {
       const ws = freshRepo();
+      mkdir(ws.repo, SCAFFOLDED_SOURCE_REL);
       init(ws, { write: true });
       const written = read(ws.repo, "composable-skills.jsonc");
       write(ws.repo, { "composable-skills.jsonc": uncomment(written, which) });
@@ -1133,6 +1189,7 @@ describe("init — the config survives its own invitation", () => {
 
   test("uncommenting the targets line still yields the ignore lines it implies", () => {
     const ws = freshRepo();
+    mkdir(ws.repo, SCAFFOLDED_SOURCE_REL);
     init(ws, { write: true });
     write(ws.repo, {
       "composable-skills.jsonc": uncomment(read(ws.repo, "composable-skills.jsonc"), [1]),

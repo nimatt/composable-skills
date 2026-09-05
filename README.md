@@ -120,6 +120,93 @@ frontmatter is byte-identical to the template's — asserted, not merely intende
 is structurally incapable of reaching it. Compiled output is **never tracked**: it is regenerated
 on each machine from the template plus that machine's overrides.
 
+## Shipping skills as a package
+
+A skills repo can publish its templates to the registry, and a project repo names the package as
+one `sources` entry. Two layouts work, and neither needs a stub `package.json` beside the
+templates:
+
+```jsonc
+"sources": ["@acme/skills"]             // templates at the package root
+"sources": ["@acme/skills/templates"]   // templates in a subdirectory
+```
+
+A `sources` entry that is not path-like resolves by walking the `node_modules` chain from the repo
+root upward — so a dependency hoisted above a workspace child is still found — and never through
+`main` or `exports`, which a templates-only package has no reason to declare. Only the package
+directory itself may be a symlink, which is what makes a pnpm store or a workspace link ordinary:
+`node_modules` and every earlier component of the name are not looked *through* where they are
+links, or where the tool cannot read them — and neither is an entry that is there but is not a
+usable package, the dangling link an `rm -rf node_modules/.pnpm` or a branch switch leaves behind.
+None of these fails the entry. The walk steps over the level and carries on to the next
+`node_modules` up, so the entry still resolves if a higher one holds the package, and is an error
+only if none of them does.
+
+**What you are told when it resolves from further up.** The build then looks *through* the level it
+stepped over — one `stat`, whose only job is to decide what to print — and says what it found:
+
+- a package really is installed behind it: a warning naming both the copy it compiled and the
+  nearer one that would have won, so you can see that this build is not compiling what your
+  lockfile installed;
+- nothing behind it: nothing said. A pnpm store and a shared `node_modules` are this case, which is
+  what makes the warning above worth reading when it does appear;
+- the level could not be read at all: a warning saying exactly that, since the tool will not claim
+  a copy it never saw;
+- your own `node_modules` holds a broken entry for the package: a warning naming it and telling you
+  to reinstall. The same wreckage in a directory *above* your repo says nothing — no lockfile of
+  yours put it there.
+
+Any of those warnings also stops that run pruning: it writes skills and deletes none, so a source
+that resolved to a copy the tool cannot vouch for can never empty your skills directory. Where the
+package resolves nowhere at all, the error is the ordinary "no such package — is it installed?",
+or, where a level could not be read, one saying that instead, since a directory the tool was
+refused entry to is not a package you forgot to install; every level stepped over comes along as
+context beneath it.
+
+A subpath is resolved inside the package under the same rules as `include:` — every component
+`lstat`'d, no symlink followed, the result asserted inside the package and required to be a
+directory — so a published tarball carrying `templates -> /elsewhere` is refused rather than
+compiled. A subpath failure is an error, named individually, and skips that entry alone.
+
+Keep the package's `files` limited to the template directories. The build hashes **every** file
+under a source root to decide whether the compiled output is stale, so anything else the package
+ships is work the freshness check does for nothing.
+
+For the same reason, **a source root must not contain a target, or the `.composable-skills/` state
+directory the build keeps at the repo root.** Both are written by the build and hashed as inputs by
+the next one, so a build changes the very thing that was supposed to say nothing had changed. A
+target inside a source root costs one extra rebuild before the layout settles; the state directory
+inside one — which is what `"sources": ["."]` gives you — never settles at all, because the stamp
+and the build log are rewritten every run, so `--check` reports stale forever. The tool warns when
+it sees either — a `./skills/templates` subdirectory costs nothing and avoids it.
+
+**The consuming repo declares `composable-skills` itself.** A peerDependency from the templates
+package is the wrong shape: that package links against no API of the tool, it ships text. Peers
+auto-install on npm 7+ and pnpm 8+, so the consuming repo would silently acquire a tool version it
+never chose, and two template packages with disjoint ranges would fail the install outright over
+what is really only "which template syntax was this authored against".
+
+**Declaring the tool is not the same as having it where the hook looks.** The `SessionStart` hook
+`init` writes is the fixed literal `node "$CLAUDE_PROJECT_DIR/node_modules/composable-skills/dist/cli.js" build`,
+which looks in the repo the session opened and walks no chain of its own. So in exactly the layout
+the `sources` walk makes work — a workspace child whose dependencies are hoisted to the monorepo
+root — the source resolves while the hook silently never runs; declaring the dependency in the
+child does not stop npm hoisting it out. The same gap opens when the tool arrives only as a
+transitive dependency of the templates package. What matters is that the path above exists in the
+repo a session actually opens: `init` warns when it does not, and a fresh `git worktree` needs its
+own install for the same reason.
+
+Both belong in `devDependencies`, and so does the check: **`--check` belongs in a dev install**,
+because a source the tool cannot use is an error, which makes a named source a hard dependency of
+the build. A production `--omit=dev` install has neither the templates package nor the tool — which
+is why the `postinstall` line `init` prints is fail-soft, and why a repo that installs that way
+must not name a source it will not have.
+
+```bash
+npm install --save-dev @acme/skills composable-skills
+composable-skills init --write   # then edit one line: "sources": ["@acme/skills/templates"]
+```
+
 ## The two directives
 
 Both are HTML comments, so a template stays valid, readable markdown.
@@ -250,8 +337,9 @@ repos publishing a skill of the *same name* there still collide on content; last
 build identifies itself by `id` only where the marker and the current config **both** declare
 one, and by repo root path otherwise — so a directory written before an `id` was declared is
 still matched by path. It is one more reason to declare `id`: without it a worktree will not
-recognise the main checkout's output. And if a configured source root cannot be read, nothing is
-pruned that run: a missing `node_modules` must not read as "every skill was deleted". The full
+recognise the main checkout's output. And if a configured source root cannot be read — or resolved
+past a level a nearer copy of the package could have been sitting behind — nothing is pruned that
+run: a missing `node_modules` must not read as "every skill was deleted". The full
 rules are in [the spec](docs/specs/tool-contract.md#ownership-and-pruning).
 
 Alongside the compiled output, the build keeps a `.composable-skills/` directory at the repo
@@ -297,8 +385,9 @@ until it is fixed rather than forcing a full recompile forever. Each
 skill is staged in a temp directory inside the target and swapped into place on success, so a
 failed build never destroys the last good output. And `build` exits 0 unconditionally, so a
 fail-soft session hook can never break a session — `build --check` is the variant that writes
-nothing and exits non-zero when the output is stale, when the last build had errors, or when
-this run's own config produced one.
+nothing and exits non-zero when the output is stale, when the last build had errors, or when this
+run produced an error of its own — from its config, or from a source root that resolved but could
+not be read.
 
 One thing the hook cannot fix from inside a session: a harness does not pick up a skills
 directory that did not exist when the session started, so the first session after a fresh clone

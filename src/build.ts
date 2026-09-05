@@ -55,7 +55,11 @@ export function runBuild(options: BuildOptions): number {
   const logDir = check ? null : stateDir(config.repoRoot);
   const discovery = discoverSkills(config);
   /** Recomputed every run, so a gated run must not replay them from the stamp as well. */
-  const live: Diagnostic[] = [...loaded.diagnostics, ...discovery.diagnostics];
+  const live: Diagnostic[] = [
+    ...loaded.diagnostics,
+    ...loaded.buildAdvice,
+    ...discovery.diagnostics,
+  ];
   const skills = discovery.skills;
 
   const stamp = computeStamp(config, options.version ?? toolVersion());
@@ -170,7 +174,10 @@ export function runBuild(options: BuildOptions): number {
     const keep = new Set(skills.map((skill) => skill.name));
     if (!discovery.complete) {
       diagnostics.push(
-        warning("a configured source root could not be read in full — nothing was pruned this run"),
+        warning(
+          "a configured source root could not be read in full, or resolved to a copy this build " +
+            "cannot vouch for — nothing was pruned this run",
+        ),
       );
     } else {
       const orphaned = previouslyCompiled(stored).filter((name) => !keep.has(name));

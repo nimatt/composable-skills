@@ -4,8 +4,7 @@ import path from "node:path";
 import type { CompiledSkill, Config, Diagnostic, Root } from "./types.ts";
 import { describe, error, warning } from "./types.ts";
 import { OUTPUT_FILENAME, OWNER_MARKER } from "./layout.ts";
-import { isMissing } from "./discover.ts";
-import { createdAtFromName, pathExists, removeQuietly, uniqueSuffix } from "./fsutil.ts";
+import { createdAtFromName, isMissing, pathExists, removeQuietly, uniqueSuffix } from "./fsutil.ts";
 import { markerContent, ownedByThisBuild, standingOf } from "./ownership.ts";
 
 const TMP_PREFIX = ".composable-skills-tmp-";

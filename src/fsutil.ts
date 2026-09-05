@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 
+export function isMissing(cause: unknown): boolean {
+  const code = (cause as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 export function pathExists(candidate: string): boolean {
   try {
     fs.lstatSync(candidate);

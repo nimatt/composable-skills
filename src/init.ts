@@ -296,7 +296,9 @@ function configTemplate(id: string): string {
 
   // Template roots. A path, or an installed package. Later entries replace an earlier entry's
   // skill of the same name wholesale. Nothing compiles until this directory holds a skill
-  // directory with a SKILL.md.tmpl in it.
+  // directory with a SKILL.md.tmpl in it. Until the directory exists at all, every build reports
+  // it as an error and build --check exits non-zero: create it, or repoint this entry at an
+  // installed package.
   //
   // The trailing comma is deliberate and is not a typo: this file is JSONC, the loader strips a
   // trailing comma, and without one the very next thing this file invites you to do — uncomment a

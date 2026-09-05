@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { Config, Diagnostic, DiscoveredSkill } from "./types.ts";
-import { describe, warning } from "./types.ts";
+import { describe, error, warning } from "./types.ts";
 import { OUTPUT_FILENAME, TEMPLATE_FILENAME } from "./layout.ts";
+import { isMissing } from "./fsutil.ts";
 
 export interface Discovery {
   skills: DiscoveredSkill[];
@@ -26,9 +27,7 @@ export function discoverSkills(config: Config): Discovery {
     try {
       entries = fs.readdirSync(root.path, { withFileTypes: true });
     } catch (cause) {
-      diagnostics.push(
-        warning(`cannot read source root ${root.path}: ${describe(cause)} — skipped`),
-      );
+      diagnostics.push(error(`cannot read source root ${root.path}: ${describe(cause)} — skipped`));
       complete = false;
       continue;
     }
@@ -135,9 +134,4 @@ function probeFile(candidate: string): FileProbe {
   } catch (cause) {
     return isMissing(cause) ? "missing" : "unreadable";
   }
-}
-
-export function isMissing(cause: unknown): boolean {
-  const code = (cause as NodeJS.ErrnoException).code;
-  return code === "ENOENT" || code === "ENOTDIR";
 }

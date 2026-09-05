@@ -115,8 +115,18 @@ agnostic. Two patterns are expected, and the tool sees no difference between the
    Their tweaks live in their own override directory, not in the clone — so this is not a
    fork of shared content, and the clone stays clean and pullable.
 2. **Wrapper package.** A separate npm package depends on the tool and ships skill templates,
-   re-exposing the tool's CLI. The build then behaves exactly as if the developer had
+   ~~re-exposing the tool's CLI.~~ The build then behaves exactly as if the developer had
    installed the tool directly, except templates resolve from the wrapper package.
+
+> **Corrected 2026-09-04.** The struck clause is not what shipped, and the spec sentence it became
+> — *"and re-expose the CLI; the tool sees no difference"* — has been deleted. There is no CLI to
+> re-expose: the `SessionStart` hook `init` writes names *this* tool's own entry point at
+> `node_modules/composable-skills/dist/cli.js`, and **the consuming repo declares
+> `composable-skills` itself** rather than acquiring it through the package — a peerDependency
+> would auto-install a tool version the repo never chose, and two packages with disjoint ranges
+> would fail the install outright. What the package contributes is templates and one `sources`
+> entry. See [`README.md`](../../README.md), *Shipping skills as a package*, and
+> [`docs/plans/skills-package-consumption.md`](../plans/skills-package-consumption.md).
 
 The design requirement this imposes: **template resolution must be configurable**, so a
 wrapper can point the tool at its own template directory. Plugin/marketplace delivery is one
@@ -139,9 +149,18 @@ architectural trade-off.
 ## How does the tool resolve templates?
 
 **Answer:** An **ordered list of template sources**, declared in a tracked config file in the
-consuming repo. Sources resolve by node module resolution or by path. **Later sources win on
+consuming repo. ~~Sources resolve by node module resolution or by path.~~ **Later sources win on
 skill-name collision**, and the unit of collision is the whole skill — sources never merge
 within one skill.
+
+> **Corrected 2026-09-04.** The struck sentence is not what shipped. A non-path-like entry is
+> resolved as a *directory*, never as a module: the tool walks the `node_modules` chain from the
+> repo root upward looking for the first `<dir>/node_modules/<name>` carrying a `package.json`,
+> and never consults `main` or `exports` — a templates-only package has no entry point, so module
+> resolution was the wrong instrument. Node's global fallbacks (`~/.node_modules`,
+> `~/.node_libraries`, `/usr/lib/node`) are deliberately not honoured, and an entry may name a
+> subpath inside the package, resolved under the same containment discipline as `include:`. See
+> [the spec's *Configuration*](../specs/tool-contract.md#configuration).
 
 ```jsonc
 // composable-skills.jsonc
@@ -154,8 +173,17 @@ within one skill.
 }
 ```
 
-A wrapper package ships this file as its default, so a developer using one never writes it.
+~~A wrapper package ships this file as its default, so a developer using one never writes it.~~
 A single template root is just a one-element list, so the wrapper case loses nothing.
+
+> **Corrected 2026-09-04.** The struck sentence was never implementable and is not what shipped.
+> Config discovery walks *up* from the working directory and stops at the first `.git`, so a
+> config file inside `node_modules/<pkg>` is never reached, and the `sources` default is empty.
+> **Every consuming repo writes its own config**; a package's entire contribution is the one
+> `sources` entry the repo adds — exactly the `"@acme/skill-templates"` line in the block above.
+> A package-supplied default config was then rejected outright rather than deferred: a dependency
+> that can name `targets` is a supply-chain problem. See
+> [`docs/plans/skills-package-consumption.md`](../plans/skills-package-consumption.md).
 
 This buys three things a single root cannot: a project repo can take a company pack wholesale
 *and* add its own repo-specific skills through the same tool; `explain` can report which

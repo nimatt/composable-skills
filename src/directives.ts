@@ -3,8 +3,7 @@ import path from "node:path";
 
 import type { SlotBlock, SlotMode, SourceLine } from "./types.ts";
 import { describe } from "./types.ts";
-import { isUnder } from "./contain.ts";
-import { isMissing } from "./discover.ts";
+import { resolveContainedFile } from "./contain.ts";
 import { normaliseEol } from "./text.ts";
 
 export type { LineOrigin, SourceLine } from "./types.ts";
@@ -70,101 +69,6 @@ export interface IncludeResolution {
   path: string;
 }
 
-/**
- * `root`/`missing` mean the path is not there; `root-unreadable`/`unreadable` mean it is there and
- * this process cannot see it. Collapsing the two is what let a `chmod`'d override root revert a
- * slot to its template default with nothing said — the same distinction `discover.ts` draws
- * between an absent skill and one the build cannot look at.
- */
-export type ContainmentFailure =
-  | { kind: "root" }
-  | { kind: "root-symlink" }
-  | { kind: "root-unreadable"; cause: unknown }
-  | { kind: "missing"; part: string }
-  | { kind: "unreadable"; part: string; cause: unknown }
-  | { kind: "symlink"; part: string }
-  | { kind: "outside" }
-  | { kind: "not-file" };
-
-function rootFailure(cause: unknown): ContainmentFailure {
-  return isMissing(cause) ? { kind: "root" } : { kind: "root-unreadable", cause };
-}
-
-function partFailure(cause: unknown, part: string): ContainmentFailure {
-  return isMissing(cause) ? { kind: "missing", part } : { kind: "unreadable", part, cause };
-}
-
-export type ContainedFile = { path: string } | { failure: ContainmentFailure };
-
-export interface ContainmentOptions {
-  /**
-   * Refuse a root whose own last component is a symlink. Containment is asserted against the
-   * *resolved* root, so `ln -s <outside> <root>` otherwise reads outside it cleanly and the
-   * config's `${home}` check — which runs on unresolved path text — does not see it either.
-   * Off for source roots, where a symlinked package directory is ordinary (pnpm, workspaces).
-   */
-  rejectSymlinkedRoot?: boolean;
-}
-
-/**
- * Resolve `<root>/<...parts>` under the containment discipline the spec requires of every path
- * the compiler reads: the root is `realpath`'d once, every component is `lstat`'d with any
- * symlink hop refused, the result is asserted contained, and only a regular file is accepted.
- */
-export function resolveContainedFile(
-  root: string,
-  parts: string[],
-  options: ContainmentOptions = {},
-): ContainedFile {
-  const last = parts[parts.length - 1] ?? "";
-
-  if (options.rejectSymlinkedRoot === true) {
-    let rootStats: fs.Stats;
-    try {
-      rootStats = fs.lstatSync(root);
-    } catch (cause) {
-      return { failure: rootFailure(cause) };
-    }
-    if (rootStats.isSymbolicLink()) return { failure: { kind: "root-symlink" } };
-  }
-
-  let realRoot: string;
-  try {
-    realRoot = fs.realpathSync(root);
-  } catch (cause) {
-    return { failure: rootFailure(cause) };
-  }
-
-  let current = realRoot;
-  for (const part of parts) {
-    current = path.join(current, part);
-    let stats: fs.Stats;
-    try {
-      stats = fs.lstatSync(current);
-    } catch (cause) {
-      return { failure: partFailure(cause, part) };
-    }
-    if (stats.isSymbolicLink()) return { failure: { kind: "symlink", part } };
-  }
-
-  let real: string;
-  try {
-    real = fs.realpathSync(current);
-  } catch (cause) {
-    return { failure: partFailure(cause, last) };
-  }
-  if (!isUnder(realRoot, real)) return { failure: { kind: "outside" } };
-
-  let stats: fs.Stats;
-  try {
-    stats = fs.statSync(real);
-  } catch (cause) {
-    return { failure: partFailure(cause, last) };
-  }
-  if (!stats.isFile()) return { failure: { kind: "not-file" } };
-  return { path: real };
-}
-
 export function resolveIncludePath(
   spec: string,
   sourceRoot: string,
@@ -204,7 +108,13 @@ export function resolveIncludePath(
       return { message: `include: "${spec}" resolves outside its source root` };
     case "not-file":
       return { message: `include: "${spec}" is not a file` };
-    default:
+    case "not-directory":
+      return { message: `include: "${spec}" is not a directory` };
+    case "root-symlink":
+      return {
+        message: `include: "${spec}" cannot be resolved — source root ${sourceRoot} is itself a symlink`,
+      };
+    case "missing":
       return { message: `include: "${spec}" not found under ${sourceRoot}` };
   }
 }

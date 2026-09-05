@@ -378,15 +378,52 @@ describe("override containment", () => {
     expect(written).toBe(false);
   });
 
-  // Invariant 8's least obvious clause. Containment is asserted against the root's `realpath`, so
-  // a root that is *itself* a symlink would silently widen to wherever it points and every
-  // component check below it would pass. The rejection is on the root, before any lookup.
-  test("an override root that is itself a symlink is rejected", () => {
+  /**
+   * Invariant 8's least obvious clause. Containment is asserted against the root's `realpath`, so
+   * a root that is *itself* a symlink would silently widen to wherever it points and every
+   * component check below it would pass.
+   *
+   * Two rules can reject this root, and which one speaks depends on where the link *lands*. Here
+   * it lands outside `${home}`, and the `${home}` promise is asked of the real path at config
+   * load — so the root never becomes a root at all, and the message names the escape rather than
+   * the link. That is the stricter of the two and the one worth saying: `${home}/…` naming a
+   * directory outside `${home}` is the developer's mistake whether or not a symlink is how it got
+   * there, and it now reads identically to the lexical `${home}/../elsewhere` spelling of it. The
+   * root-is-a-symlink message is not lost — see the test below, where the link stays inside
+   * `${home}` and `rejectSymlinkedRoot` is what fires.
+   */
+  test("an override root that leaves ${home} through a symlink is rejected at load", () => {
     const ws = workspace({
       repoFiles: { "templates/ov/SKILL.md.tmpl": TEMPLATE },
     });
     write(ws.root, { "outside/ov/s.md": "SMUGGLED CONTENT\n" });
     symlink(`${ws.root}/outside`, ws.home, "global");
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(true);
+    expect(lines(run)).toContain(
+      `composable-skills: error override "\${home}/global" resolves to ` +
+        `${path.join(ws.home, "global")}, which leads through a symlink to ` +
+        `${path.join(ws.root, "outside")}, outside ${ws.home} — skipped`,
+    );
+    // the skill still compiles; it is the override root that was dropped, not the build
+    expect(compiled(ws, "ov")).toContain("The safe default.");
+    // and the content behind the link never reached the output
+    expect(run.stdout).not.toContain("SMUGGLED CONTENT");
+    expect(compiled(ws, "ov")).not.toContain("SMUGGLED CONTENT");
+  });
+
+  // The other side of that split, and what keeps the root-is-a-symlink rejection under test: the
+  // link stays inside `${home}`, so the containment check at load passes and the rejection is the
+  // one `compile.ts` makes when it reads the root.
+  test("an override root that is itself a symlink, inside ${home}, is rejected on read", () => {
+    const ws = workspace({
+      repoFiles: { "templates/ov/SKILL.md.tmpl": TEMPLATE },
+    });
+    write(ws.home, { "elsewhere/ov/s.md": "SMUGGLED CONTENT\n" });
+    symlink(`${ws.home}/elsewhere`, ws.home, "global");
 
     const run = build(ws);
 

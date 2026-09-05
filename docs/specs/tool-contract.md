@@ -7,8 +7,8 @@ writes them where an agent harness will find them. It ships no skills.
 
 A **consuming repo** installs it and is either a **skills repo** (skills are its deliverable)
 or a **project repo** (skills describe its own code). The tool behaves identically for both —
-only the configured targets differ. A **wrapper package** may depend on the tool, ship its own
-templates, and re-expose the CLI; the tool sees no difference.
+only the configured targets differ. A **wrapper package** may depend on the tool and ship its own
+templates; a consuming repo reaches those templates by naming the package in `sources`.
 
 For *why* the design is shaped this way — especially build-time composition, untracked output,
 and the session-hook trigger — see
@@ -56,21 +56,116 @@ anywhere above it, and the defaults below apply. An unknown key warns and is ign
 | Key | Meaning |
 |---|---|
 | `id` | Stable identity for this repo. **Declared, never derived from the path** — a worktree at `.claude/worktrees/feat-x` and the main checkout are one repo and must resolve the same overrides, and two unrelated repos both cloned as `api` must not collide. It is interpolated into a path, so it must be a single path segment of `[A-Za-z0-9._-]`, and neither `.` nor `..`; a violation is **fatal**. |
-| `sources` | Template roots. Resolved by node module resolution or by path. |
+| `sources` | Template roots. Each entry is resolved as an installed package or as a path. |
 | `overrides` | Override roots. Scanned in reverse, so a later entry takes precedence. |
 | `targets` | Output directories. All are written on every build. |
 
 `${home}` is `${XDG_CONFIG_HOME:-~/.config}/composable-skills`, relocatable via
 `COMPOSABLE_SKILLS_HOME`. The two personal roots are siblings — `${home}/global` and
 `${home}/repos/<id>` — so no path is ambiguously interpretable as either. An entry containing
-`${id}` is skipped with a warning where the config declares no `id`, which leaves the default
-`${home}/repos/${id}` root inert until one is declared. An entry that spells `${home}` is
-asserted to resolve *inside* it; one that escapes by `..` is dropped with an error — that entry
-only, not the run. A leading `~` or `~/` expands to the home directory in any entry; a `~/…`
-entry names no root to be contained by and so carries no containment check.
+`${id}` is skipped where the config declares no `id`: an **error** for a `sources` entry, which
+names a source the tool cannot use, and a **warning** for an override or a target, which leaves
+the default `${home}/repos/${id}` root inert until one is declared — the designed behaviour of a
+shipped default rather than a mistake. An entry that spells `${home}` is asserted to resolve
+*inside* it, and the question is asked twice: of the resolved text, which catches a `..` that walks
+out lexically, and of the **real** path, which catches an entry that leads out through a symlink.
+Either escape drops that entry with an error — that entry only, not the run — in any of the three
+lists: a source read from outside `${home}`, an override read from outside it, and a target written
+outside it are one mistake wearing three hats. This is the one check that reaches a named root's
+own last component, which nothing `lstat`s (see [invariant 8](#constraints-and-invariants)). A
+leading `~` or `~/` expands to the home directory in any entry; a `~/…` entry names no root to be
+contained by and so carries no containment check.
 
-Defaults, so a consuming repo using a wrapper package need not write this file at all:
-`sources` empty, `overrides` as shown, `targets` `["./.claude/skills"]`.
+Defaults: `sources` empty, `overrides` as shown, `targets` `["./.claude/skills"]`.
+**Every consuming repo writes this file itself.** Discovery walks *up* from the working directory
+and stops at the first `.git`, so a config shipped inside `node_modules/<pkg>` is never reached; a
+package's entire contribution is the one `sources` entry the repo adds. The empty `sources`
+default is what makes a repo with no config inert — it compiles nothing rather than guessing.
+
+**A `sources` entry that is not path-like is an installed package.** The entry is split on `/`
+and `\` alike — a Windows separator names the same subpath, and splitting on `/` only would let
+`skills\templates` through as a bare package name whose subpath is never resolved at all — into a
+package name (two segments where it is scoped, one otherwise) and an optional subpath. The name
+resolves by walking the `node_modules` chain from the repo root upward — `<dir>/node_modules/<name>`,
+first directory carrying a `package.json` winning — and by nothing else. `main` and `exports` are
+never consulted: a templates-only package has no entry point, so module resolution is the wrong
+instrument. A directory of that name carrying no `package.json` is not a package, and the walk
+continues past it rather than stopping there — recording it as a level it stepped over, since
+something that is there and is not a package is a broken install rather than an absence. Node's
+global fallbacks — `~/.node_modules`, `~/.node_libraries`, `/usr/lib/node` — are deliberately not
+honoured, so a globally installed package cannot become a source of skills; that is the same
+stance the tool takes on installing itself. The walk may find the package *above* the repo root,
+which is what makes a workspace child with a hoisted dependency work; the walk only reads, so
+nothing is written outside the repo.
+
+Two things are refused rather than resolved. Each has its own diagnostic, each is an error, and
+each skips that entry alone:
+
+- **Not a package name.** A scoped name is `@scope/name`; no segment may be empty, `.` or `..`;
+  and the name path joined to `<repoRoot>/node_modules` is asserted — lexically, once, before
+  anything is stat'd — to still be under it. That assert is the durable form of the segment rules,
+  since it stays answered however a platform's `path.join` reads what it is handed, and a
+  violation reports as the same not-a-package-name failure.
+- **A subpath that does not resolve.** Where the entry names one — `@acme/skills/templates` — it
+  is resolved under the same containment discipline as `include:`: the package root is
+  `realpath`'d once, every component is `lstat`'d with any symlink hop refused, the result is
+  asserted to be inside the package, and it must be a directory.
+
+A third thing is **stepped over rather than refused: a level of the chain the walk took no answer
+from.** `<dir>/node_modules` and every component of the name *bar the last* are `lstat`'d, and one
+that is a link, or that this process cannot read, is not looked *through*. Neither is a level that
+is there and is not a usable package — a directory carrying no readable `package.json`, which is a
+dangling workspace link or a half-restored cache rather than an absence. In each case the walk
+carries on to the level above, because a link at one level says nothing about the level above: so
+the entry still resolves where a higher `node_modules` holds the package, and fails only where none
+does. Which paths here may be a symlink and which may not is
+[invariant 8](#constraints-and-invariants)'s table of routes; what is *said* about a level that was
+stepped over is settled below.
+
+**Where the entry resolved, a stepped-over level is confirmed before anything is said about it.**
+The tool `stat`s *through* the level, purely to ask whether a copy of the package is sitting behind
+it. That opens no compile path — the answer picks a diagnostic, and nothing is ever read from what
+it found — so invariant 8, which governs what a build reads into its output, is untouched.
+Resolution itself still refuses to look through such a level; what compiles is not changed by
+asking. Four outcomes:
+
+- a package really is behind the level: a **warning** naming both the path the entry resolved to
+  and the nearer copy, and saying that the nearer copy would have won — so this build is not
+  compiling the one installed for this repo;
+- nothing is behind it: **silence**. Invariant 8 asks that no symlink be walked past *silently*,
+  and where the confirming `stat` finds nothing behind the level there is nothing that was passed
+  over. The ordinary pnpm and shared-`node_modules` layouts are this case, which is what makes the
+  warning above mean something when it does appear;
+- the level itself is what cannot be read: a **warning** saying so — that whether a nearer copy is
+  installed behind it could not be checked — rather than asserting a copy nobody saw;
+- the level is an entry that is not a usable package **in this repo's own `node_modules`**: a
+  **warning** naming it as this repo's own install of the package and pointing at a reinstall. The
+  same shape above the repo root is silent, deliberately: an ancestor's install is governed by no
+  lockfile this developer controls, so naming it names them no action.
+
+**A level that confirms as anything but harmless leaves the run incomplete**, and an incomplete run
+prunes nothing (see *Ownership and pruning*): the corpus that resolved may not be the corpus that
+exists, and a substituted package with no skills of its own must not take the compiled skills with
+it. The three outcomes that speak are warnings, so `--check` still exits 0 and the suppressed
+prune is the only other consequence.
+
+**Where the entry resolved nowhere, nothing is confirmed and every stepped-over level rides as a
+warning under the failure.** There is nothing to confirm: the note claims only that a copy
+installed behind the level was not considered, which holds whether or not one is there. The
+headline is never the skipped level — it is the ordinary not-installed error, or, where a level
+could not be read, an error saying *that* rather than asking whether the package is installed,
+missing and unreadable being kept apart here as they are everywhere else, since a directory this
+build was refused entry to is not a package the developer forgot to install.
+
+**The path a source root resolves to is normalised by its shape**, which is worth stating because
+that path is hashed into the stamp and printed in every diagnostic naming the root. A bare package
+entry keeps the path the walk built, `<dir>/node_modules/<name>`, symlinks and all — resolving it
+further would undo the exemption that let it resolve. A subpath entry keeps `realpath`'s answer,
+because the containment discipline resolves before it asserts. A path entry is resolved lexically
+against the repo root and `realpath`'d nowhere. So under pnpm one install reports a path inside the
+repo's `node_modules` when named bare and a path inside the store when named with a subpath; and
+re-spelling a `sources` entry from one form to the other changes the stamp and costs one
+rebuild.
 
 ### Targets
 
@@ -198,10 +293,11 @@ diagnostic is for. Not finding a file and not being able to read one must never 
 the same silence. Containment is asserted on the paths it does find, the same way
 `include:` is: every component of `<root>/<skill>/<slot>.md` is `lstat`'d, and an override that
 escapes its root by `..` or a symlink hop, or that names something other than a regular file,
-rejects the skill. An override root whose own last component is a symlink is rejected too:
-containment is asserted against the root's `realpath`, so a symlinked root would silently widen
-to wherever it points. Source roots are deliberately exempt from that last rule — a symlinked
-package directory is ordinary under pnpm and workspaces.
+rejects the skill. An override root whose own last component is a symlink is rejected too —
+containment is asserted against the root's `realpath`, so a symlinked root would widen silently to
+wherever it points. That is the one root a config entry named that the tool checks anyway; which
+other paths may be a symlink, and what happens to each that may not, is
+[invariant 8](#constraints-and-invariants)'s table of routes.
 
 Whether a given override root is tracked by git is the repo's choice and carries no special
 meaning — a tracked root is how a repo fills a slot for everyone who builds there.
@@ -229,7 +325,7 @@ the phase each is planned for, and running one prints that and exits non-zero.
 
 | Command | Run by | Behaviour |
 |---|---|---|
-| `build [--check]` | the `SessionStart` hook, a `postinstall` a repo added itself, rarely a human | compiles every skill to every target. `--check` writes nothing and exits non-zero if the output is stale, if the last build had errors, or if this run's own config produced an error. A skill the build declined to write, because a target held something that was not this tool's to replace, is not stale output: the decline is reported and `--check` still exits 0 unless something else failed. |
+| `build [--check]` | the `SessionStart` hook, a `postinstall` a repo added itself, rarely a human | compiles every skill to every target. `--check` writes nothing and exits non-zero if the output is stale, if the last build had errors, or if this run produced an error of its own — from its own config (an entry it cannot use) or from discovery (a source root that resolved but cannot be read). A skill the build declined to write, because a target held something that was not this tool's to replace, is not stale output: the decline is reported and `--check` still exits 0 unless something else failed. Neither is a source that resolved to a copy the build cannot vouch for — a warning, whose one consequence is that the run prunes nothing. |
 | `init [--write\|--dry-run]` | consuming-repo maintainer, once | writes the config, the `.gitignore` lines, and the `SessionStart` hook entry. Diff-first: prints exactly what it would do, and writes nothing without `--write`. |
 | `override <skill> <slot> [--write\|--dry-run]` | a developer | creates and seeds the override file for one slot in the highest-precedence override root, and prints the path. Writes by default; never overwrites a file that exists. |
 | `lint` | a skills repo's CI | validates templates without building. Non-zero on any rejection. |
@@ -383,17 +479,53 @@ written, and the previous output is left exactly as it stands:
 
 The distinction is between a config the tool cannot read and a config entry it cannot use: a
 single unusable *entry* — a missing source root, a `${home}` escape, an unknown key — is a
-warning or an error against that entry alone and the run proceeds. A fatal config still exits 0
-under `build`, because the build runs inside a fail-soft session hook; `--check` exits non-zero.
-It is reported on all three channels like anything else — the state directory's location is
+warning or an error against that entry alone and the run proceeds. Which of the two is not
+arbitrary: **a source the tool cannot use is an error**, whether it is named as a package or as a
+path. That covers a `sources` entry that is not a package name at all; one naming a package found
+in no `node_modules` from the repo root upward, and one where a level of that chain could not be
+read, so whether the package is installed there was not a question this build was allowed to ask;
+one whose subpath is absent, refused for a symlink hop, cannot be read, or is not a directory; a
+`sources` path root that does not exist; a `sources` entry using `${id}` where no `id` is declared;
+and — the same rule reaching into discovery — a source root that resolved but cannot be read. A
+repo that has silently lost skills it asked for must not report success on `--check`, the one
+channel a human or a CI job reads.
+
+The rule has an exception at each end. An **empty** entry only warns, in `sources` as in the other
+two lists: an empty string names nothing that could be unusable, so there is no source to have
+lost. And an entry spelling `${home}` that resolves outside it is an error in **any** of the three
+lists — not by this rule but by containment, which is not a `sources` question. Everything else at
+entry level warns, *no usable source root at all* included: that line still has to cover a config
+declaring no sources, which is the inert default rather than a mistake. **A named source is
+therefore a hard dependency of the build** — a repo that installs without devDependencies must not
+name one.
+
+**Severity is `--check`'s vocabulary, and `--check` is the only thing that reads it.** `build`
+exits 0 whatever it reported. `init` and `override` load the same config and print its
+diagnostics — all but the source-root-contains-output warning below, which is a statement about
+what the next build's stamp will hash and so is reported by `build` alone — but neither consults
+their severity: `init` exits non-zero only where it refused a step, `override` only where it could
+not create the file it was asked for. So a second `init` in a
+repo it has already wired up prints `error source root "./skills/templates" does not exist` — about
+the directory the config it wrote invites the developer to create — and exits 0, having done its
+own job. The word grades the observation, not the verb's outcome.
+
+A fatal config still exits 0 under `build`, because the build runs inside a fail-soft session
+hook; `--check` exits non-zero. It is reported on all three channels like anything else — the state directory's location is
 recovered from the repo root rather than the config, precisely because a fatal config is the
 likeliest real failure in the context the file channel exists for.
 
 **Warned**, among others — the list below is illustrative, not the enumerated set:
 
-- *config* — an unknown key; an empty entry in any list; an entry using `${id}` where no `id` is
-  declared; a `sources` entry that resolves to no package; a `sources` root that does not exist;
-  no usable source root at all; no targets configured.
+- *config* — an unknown key; an empty entry in any list; an override or target entry using
+  `${id}` where no `id` is declared; no usable source root at all; no targets configured; a level
+  of a package entry's `node_modules` chain that was stepped over — where the entry resolved, only
+  once a `stat` through the level confirmed a nearer copy of the package, a level that could not be
+  checked, or an entry that is not a usable package in this repo's own `node_modules`; where it
+  resolved nowhere, every stepped-over level, as context beneath the error; and — reported by
+  `build` alone, being about a build and nothing else — a source root that contains a target root
+  or the state directory: both are
+  written by the build and hashed as inputs by the next one, so a build recompiles when nothing
+  changed, and where the build state is inside a source root `--check` reports stale forever.
 - *discovery and compilation* — a directory holding a `SKILL.md` or a `*.tmpl` but no
   `SKILL.md.tmpl`; a skill directory that is a symlink, which is not followed; a template or a
   skill directory that cannot be read; a skill name colliding across sources; a symlink inside a
@@ -406,8 +538,9 @@ likeliest real failure in the context the file channel exists for.
   target holding a compiled skill of this build's name under another build's marker; a stale
   directory that cannot be removed; a target directory that exists but could not be enumerated,
   so nothing in it was considered for pruning; nothing pruned this run because the
-  corpus could not be enumerated in full, or because the config resolved to no source root at
-  all while the stamp still remembers compiled skills.
+  corpus could not be enumerated in full or a source resolved to a copy the build cannot vouch
+  for, or because the config resolved to no source root at all while the stamp still remembers
+  compiled skills.
 - *locking* — another build holds the lock, so nothing was built; the state directory cannot be
   written, so the build proceeds unlocked.
 
@@ -495,7 +628,10 @@ may be shared:
 - If the source corpus could not be enumerated end to end, **nothing is pruned for that entire
   run** — a source root that did not resolve, one that cannot be read, a skill directory whose
   template cannot be read, or a skill directory that turned out to be a symlink. What the build
-  could not read is indistinguishable from what was deleted upstream.
+  could not read is indistinguishable from what was deleted upstream. **A source root that
+  resolved doubtfully counts the same way**: where the walk stepped over a level a nearer copy of
+  the package could have been sitting behind, the corpus that resolved may not be the corpus that
+  exists, and a substituted package with no skills of its own would otherwise empty the target.
 - A **target** that exists but cannot be enumerated is that same observation pointed the other
   way, and **nothing in that target is pruned** — the build warns, naming the target, and goes on
   writing to the others. The scope differs because the cause does: a source root that cannot be
@@ -612,16 +748,43 @@ string it writes, which must stay byte-stable whatever is on disk today.
    contract*).
 7. **The tool never writes outside the repo it is run in, except to the configured override and
    target roots.**
-8. **No symlink is ever followed or copied, and none is followed silently.** One containment
-   discipline covers `include:` and overrides alike — every path component is `lstat`'d and any
-   symlink hop rejects, an override root that is itself a symlink included. A symlink inside a
-   skill directory is warned about and skipped rather than copied. An ownership marker that is a
-   symlink is not read through, and its directory reads as unmarked. A symlinked skill directory is
-   not discovered as a skill, warns, and blocks pruning for that run — its compiled output would
-   otherwise be deleted as a skill that no longer exists. And the stamp records a symlink's
-   destination without reading through it, since retargeting one changes what the build refuses
-   to do. The single exception is a source root's own last component, where a symlinked package
-   directory is ordinary under pnpm and workspaces.
+8. **No symlink is ever followed or copied, and none is followed silently.** What the tool checks
+   is what it **derived**. A root a config entry *names* is a destination the tool did not
+   construct: nothing `lstat`s it — not its last component, and for a path entry not any component
+   of it — and it is reached however the filesystem reaches it. Everything the tool derived, by
+   joining further names onto a root it must then vouch for, is `lstat`'d in full, its own last
+   component included. That is why `@acme/skills` resolves cleanly through a symlinked package
+   directory while `@acme/skills/templates` does not: the subpath entry's source root is the
+   *derived* `<package>/templates`, whose own last component is checked like any other. The one
+   path the tool builds in order to *reach* a named destination is the `node_modules` chain it
+   walks for a package name, and that is derived too — every level of it is `lstat`'d bar the
+   package directory the name lands on. One named root is `lstat`'d all the same, because the code
+   that reads it asks for that and not because this rule requires it — an **override root**, whose
+   only job is to bound what may be read, and which would otherwise widen silently to wherever it
+   pointed.
+
+   Position is not what decides this, so the rule is a table of routes rather than a sentence.
+   The verdicts are three — never `lstat`'d, stepped over, refused:
+
+   | Path | Named or derived | Verdict where it is a symlink |
+   |---|---|---|
+   | A `sources` path entry — `./skills/templates` | named | **Never `lstat`'d**, and neither is any component of it. Resolved lexically and then read through, so a link anywhere along it is followed and the root loads with nothing said. |
+   | The last component of a package name — `node_modules/@acme/skills` | named | **Never `lstat`'d.** Deliberate: a symlinked package directory is ordinary under pnpm and workspaces, and the walk reads the package's own `package.json` through it. |
+   | `node_modules` itself, and every earlier component of a package name | derived | **Stepped over** — not looked *through*, but the walk carries on to the next `node_modules` above, since a link at one level says nothing about the level above. Whether anything is said is settled afterwards; see *Configuration*. |
+   | An `overrides` root's own last component | named, checked by request | **Refused.** Containment is asserted against the root's `realpath`, so a link here would widen the root to wherever it points. The skill is rejected. Its earlier components are not checked, as no root's are. |
+   | A `targets` root's own path | named | **Never `lstat`'d.** The build `mkdir`s the root and writes through it; what stands *inside* it is the target-entry row below. |
+   | A `sources` subpath's components — `templates` in `@acme/skills/templates` | derived | **Refused.** An error against that entry, which is skipped. |
+   | An `include:` path's components | derived | **Refused.** The skill is rejected. |
+   | The components of `<override root>/<skill>/<slot>.md` | derived | **Refused.** The skill is rejected. |
+   | A skill directory under a source root | derived | **Refused** — not discovered as a skill, and never read through. Warns and blocks pruning for that run where the directory holds a template or otherwise looks like a skill; silent where nothing about it does. |
+   | A file inside a skill directory | derived | **Refused** — not copied to any target, and warns. |
+   | A target entry — `<target>/<skill>` | derived | **Refused** — not rewritten and not read through. Warns, and that skill is recorded as declined for that target. |
+   | A skill directory's ownership marker | derived | **Refused** — opened without following it, so the directory reads as *unmarked* and is neither overwritten nor pruned. |
+   | A link met while hashing a source or override tree | derived | **Refused** — never read through; its destination is hashed instead, since retargeting one changes what the build refuses to do. |
+
+   One check reaches a named root's own last component without `lstat`ing it: an entry spelling
+   `${home}` is asserted contained against its **real** path as well as its resolved text, which
+   is what stops `${home}/x` reading or writing outside `${home}` through a link.
 9. **Every diagnostic names a file, and a line that exists in that file.** Splicing a fragment
    moves text between coordinate spaces, so every line carries the file and line number it
    actually came from, and a diagnostic is reported in those terms — never in the expanded

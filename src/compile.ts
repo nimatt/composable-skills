@@ -16,14 +16,10 @@ import { describe, error, warning } from "./types.ts";
 import { OWNED_OUTPUT_NAMES, TEMPLATE_FILENAME } from "./layout.ts";
 import { normaliseEol } from "./text.ts";
 import { frontmatterFields, splitFrontmatter } from "./frontmatter.ts";
-import type { ContainmentFailure, LineOrigin, SourceLine } from "./directives.ts";
-import {
-  expandIncludes,
-  parseSlots,
-  renderSlots,
-  resolveContainedFile,
-  trimBlockEdges,
-} from "./directives.ts";
+import type { ContainmentFailure } from "./contain.ts";
+import { resolveContainedFile } from "./contain.ts";
+import type { LineOrigin, SourceLine } from "./directives.ts";
+import { expandIncludes, parseSlots, renderSlots, trimBlockEdges } from "./directives.ts";
 import {
   checkFrontmatterIdentity,
   findConflictMarkers,
@@ -268,14 +264,17 @@ function overrideContainmentMessage(
   >,
   root: string,
 ): string {
-  if (failure.kind === "root-symlink") {
-    return `override root ${root} is itself a symlink — containment is asserted against the resolved root, so overrides are not read through it; point the entry at a real directory`;
+  switch (failure.kind) {
+    case "root-symlink":
+      return `override root ${root} is itself a symlink — containment is asserted against the resolved root, so overrides are not read through it; point the entry at a real directory`;
+    case "symlink":
+      return `override traverses a symlink at "${failure.part}" — refusing to splice a file from outside ${root}`;
+    case "outside":
+      return `override resolves outside its override root ${root}`;
+    case "not-file":
+    case "not-directory":
+      return `override is not a regular file`;
   }
-  if (failure.kind === "symlink") {
-    return `override traverses a symlink at "${failure.part}" — refusing to splice a file from outside ${root}`;
-  }
-  if (failure.kind === "outside") return `override resolves outside its override root ${root}`;
-  return `override is not a regular file`;
 }
 
 function collectExtras(skill: DiscoveredSkill, diagnostics: Diagnostic[]): ExtraFile[] {
