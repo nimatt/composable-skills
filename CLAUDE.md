@@ -50,3 +50,5 @@ test("hello world", () => {
   It is the authority when the code and your expectation disagree.
 - [`docs/decisions/0001-build-time-composition.md`](docs/decisions/0001-build-time-composition.md)
   — why the design is shaped this way, and which alternatives were rejected and on what grounds.
+  [`0002-worktree-include.md`](docs/decisions/0002-worktree-include.md) amends one of its
+  consequences: how a worktree gets the tool and the compiled skills.

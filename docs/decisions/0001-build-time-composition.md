@@ -84,10 +84,15 @@ clone resolve the same overrides. The obvious alternative — a gitignored direc
 fails here, and the motivating repo has three worktrees live with its agent tooling creating
 more.
 
-**The hook does not survive it.** `git worktree add` produces a tree with no `node_modules`, so
-the path the hook names is absent and it fails at every session start, silently, being fail-soft.
-Overrides resolve in a worktree because they are keyed on a declared `id`; the hook resolves
-through the filesystem, and each worktree needs its own install. See
+**The hook does not survive it, and neither do the compiled skills.** A worktree receives only
+what git tracks, and nothing this tool writes is tracked: the path the hook names is absent, so it
+fails at every session start, silently, being fail-soft — and the targets are absent too, which an
+install does not fix, since a skills directory that was not there at session start is not picked up
+either way. Overrides resolve in a worktree because they are keyed on a declared `id`; a package
+named in `sources` resolves because its `node_modules` walk runs upward and reaches the main
+checkout. **Amended by [ADR 0002](0002-worktree-include.md) (2026-09-07)**, which closes both halves
+for a worktree Claude Code creates by having `init` write a `.worktreeinclude`; a worktree made by
+hand with `git worktree add` still needs its own install. See
 [the spec's *`SessionStart` hook*](../specs/tool-contract.md#the-sessionstart-hook).
 
 **The tool executes a dependency's code at session start, unsandboxed, with no trust prompt.**
@@ -222,6 +227,8 @@ skills-repo team's decision, so this belongs to whoever builds that repo's relea
 
 ## See Also
 
+- [`docs/decisions/0002-worktree-include.md`](0002-worktree-include.md) — how a worktree gets the
+  tool and the compiled skills, amending the consequence above
 - [`docs/specs/tool-contract.md`](../specs/tool-contract.md) — the config schema, directives,
   resolution chains, and verb surface this decision produces
 - [`docs/staging/qa-composable-skills-tooling.md`](../staging/qa-composable-skills-tooling.md) —

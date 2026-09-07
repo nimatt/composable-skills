@@ -193,7 +193,9 @@ the unsupported-frontmatter-field warning below is its only consequence — it f
 target on any field other than `name` and `description`.
 
 Compiled output is **never tracked**. `init` offers the `.gitignore` lines — the state directory,
-and every target that resolves inside the repo.
+and every target that resolves inside the repo — and, because gitignored is exactly what a
+worktree does not receive, the `.worktreeinclude` lines that carry those targets and the tool
+itself into one Claude Code creates.
 
 ## Template language
 
@@ -341,7 +343,7 @@ the phase each is planned for, and running one prints that and exits non-zero.
 | Command | Run by | Behaviour |
 |---|---|---|
 | `build [--check]` | the `SessionStart` hook, a `postinstall` a repo added itself, rarely a human | compiles every skill to every target. `--check` writes nothing and exits non-zero if the output is stale, if the last build had errors, or if this run produced an error of its own — from its own config (an entry it cannot use) or from discovery (a source root that resolved but cannot be read). A skill the build declined to write, because a target held something that was not this tool's to replace, is not stale output: the decline is reported and `--check` still exits 0 unless something else failed. Neither is a source that resolved to a copy the build cannot vouch for — a warning, whose one consequence is that the run prunes nothing. |
-| `init [--write\|--dry-run]` | consuming-repo maintainer, once | writes the config, the `.gitignore` lines, and the `SessionStart` hook entry. Diff-first: prints exactly what it would do, and writes nothing without `--write`. |
+| `init [--write\|--dry-run]` | consuming-repo maintainer, once | writes the config, the `.gitignore` lines, the `SessionStart` hook entry, and the `.worktreeinclude` lines that carry the tool and the compiled skills into a worktree. Diff-first: prints exactly what it would do, and writes nothing without `--write`. |
 | `override <skill> <slot> [--write\|--dry-run]` | a developer | creates and seeds the override file for one slot in the highest-precedence override root, and prints the path. Writes by default; never overwrites a file that exists. |
 | `lint` | a skills repo's CI | validates templates without building. Non-zero on any rejection. |
 | `explain [<skill>]` | anyone, when confused | provenance: which source, which overrides are active, which slots exist and which are filled. |
@@ -356,10 +358,11 @@ its own default, and only the contradiction `--write --dry-run` is an error.
 ### `init`
 
 Wires one repo up — the config file, the `.gitignore` lines covering the state directory and
-every in-repo target, and the `SessionStart` hook entry in `.claude/settings.json`. It is
+every in-repo target, the `SessionStart` hook entry in `.claude/settings.json`, and the
+`.worktreeinclude` lines that carry the tool and every in-repo target into a worktree. It is
 **idempotent**: a second run reports there is nothing to do.
 
-**It writes only inside the repo it is run in**, and only those three paths. It never writes
+**It writes only inside the repo it is run in**, and only those four paths. It never writes
 another repo's settings; it never writes `.claude/settings.local.json` or the user-level settings
 file, though it *reads* both, to warn that a hook already installed there would make every
 session build twice; and it never writes `permissions.deny`, CODEOWNERS, `package.json`, or any
@@ -380,11 +383,15 @@ It **refuses to run at all**, writing nothing and exiting non-zero, when:
 It **warns and proceeds** where no `.git` was found at or above the repo root — "the repo" is
 then that one directory, which is worth saying out loud — and where
 `node_modules/composable-skills/dist/cli.js` does not exist, which is the same silent-hook
-failure the PnP refusal exists to prevent, reached by not having installed yet or by a fresh
-`git worktree` (see *The `SessionStart` hook*). Unlike PnP that is a state which ends by itself,
-and it changes nothing about the string written, which must stay byte-stable whatever is on disk.
+failure the PnP refusal exists to prevent, reached by not having installed yet or by a
+`git worktree` made by hand. That warning **names the remedy and says which one applies**: an
+install here, or, in a worktree Claude Code created, the install in the main checkout that the
+`.worktreeinclude` step carries across — a worktree `git worktree add` made is copied into by
+nothing and needs its own (see *The `SessionStart` hook*). Unlike PnP that is a state which ends by
+itself, and it changes nothing about the string written, which must stay byte-stable whatever is on
+disk.
 
-It **refuses one step rather than overwriting a file**, letting the other two proceed and exiting
+It **refuses one step rather than overwriting a file**, letting the others proceed and exiting
 non-zero, where that file is not writable by the process — `rename(2)` does not consult a mode,
 so a mode that says *do not write me* has to be honoured deliberately — where any component of
 its path is a symlink, which is invariant 8 applied to a path that does not exist yet, or where
@@ -398,8 +405,8 @@ indistinguishable from a file that is not there, and reading it that way costs t
 the unwritable refusal goes unreachable for exactly the files it was written for, since a mode
 that refuses a read usually refuses a write too, and the diff-first promise turns false, as the
 dry run announces it is *creating* a file that is already there. All three refusals are scoped to
-**the three paths `init` writes** — the config file, the `.gitignore`, and the repo's tracked
-`.claude/settings.json`. They do not reach the two files it only reads,
+**the four paths `init` writes** — the config file, the `.gitignore`, the `.worktreeinclude`, and
+the repo's tracked `.claude/settings.json`. They do not reach the two files it only reads,
 `.claude/settings.local.json` and the user-level settings file, where one that cannot be read
 costs a warning that the duplicate-hook check could not be made, and nothing more: refusing to
 write a file this tool never writes would be a refusal about somebody else's permissions.
@@ -412,6 +419,57 @@ knows which string they meant to keep; that one exits 0, because nothing is brok
 
 What a merge preserves: every unrelated key, key order, the file's own indent width, its dominant
 line endings, a leading BOM, and its mode.
+
+#### The `.worktreeinclude` lines
+
+Claude Code copies a file into a worktree **it** creates — `--worktree`, a subagent worktree, a
+desktop parallel session — where that file matches a pattern in the repo root's
+`.worktreeinclude` **and** git ignores it. Tracked files arrive with the checkout and are never
+duplicated. Everything this tool writes is gitignored by the step above, so without those patterns
+a worktree receives none of it, and the two halves fail differently: no `node_modules` is a
+`SessionStart` hook that fails silently at every start, and no target directory is a first session
+with no skills whatever the hook does, since a skills directory that was not there when the session
+started is not picked up.
+
+`init` appends, in `.gitignore` syntax and under a `#` header of its own, one pattern per line:
+
+- **the tool's own package directory** — `/node_modules/composable-skills/**` — the path the hook
+  names with `dist/cli.js` dropped from its tail. The whole directory rather than its `dist/`: the
+  shipped bundle is ESM, and what makes node read it as ESM is the `"type": "module"` in the
+  `package.json` beside it, so a `dist/` copied alone throws before it runs.
+- **for every target that resolves inside the repo**, its contents and, on a second line of its
+  own, its ownership markers — `/<target>/**` and `/<target>/**/.composable-skills-owner`. A
+  target outside the repo is skipped, exactly as it is for the `.gitignore`: no copy reaches it
+  and this file cannot speak about it. **The marker line is redundant today and kept anyway.** A
+  `**` was measured matching the marker on Claude Code 2.1.263 — but that is undocumented, and
+  this copier's handling of a wholly-ignored directory already changed once, at 2.1.239. What the
+  line insures against is permanent: a skill directory copied without its marker is one the build
+  may never write to or prune again, warned about and left untouched on every build for the life
+  of that worktree. Both patterns also name their directory rather than leading with `**/`, which
+  is what the Claude Code documentation recommends — a `**/` pattern does reach inside a
+  wholly-ignored directory where the first name after it appears in that directory's path, but
+  that is a rule easy to get subtly wrong, and an anchored pattern does not depend on it.
+
+**A package named in `sources` is deliberately absent.** It resolves in these worktrees already:
+the `node_modules` walk runs *upward* from the repo root, and every worktree this file governs is
+nested under the main checkout, so the walk reaches the main checkout's install. The one
+arrangement that puts a worktree elsewhere is a `WorktreeCreate` hook — which is also the one case
+where `.worktreeinclude` is not read at all.
+
+The step is `gitignoreStep`'s twin in most respects: append-only, no existing line rewritten, the
+dominant line endings preserved, and the same symlink, unwritable and unreadable refusals as every
+other path `init` writes. **Dedup is where the two stop being twins.** A `.gitignore` line is
+covered by the same pattern with or without its anchoring and trailing `/`, and no more; a
+`.worktreeinclude` line is stricter still, covered only by the same pattern with or without the
+anchoring `/`. A hand-written `dir/` therefore leaves `dir/**` to be appended beside it. The reason
+is that only one of these files is read by git: `dir/` covering `dir/**` is git's equivalence,
+earned by pruning the tree during traversal, and a copier that enumerates candidate files and tests
+each path could read `dir/` as naming the directory alone. Guessing costs a redundant line if the
+strict reading is wrong, and a worktree quietly missing its tool or its skills if the loose one is.
+
+Because the step **appends**, its patterns are the last to match, and gitignore syntax resolves a
+path by its last matching pattern — so a line written here overrides an earlier `!` negation in a
+hand-edited file rather than being overridden by it.
 
 ### `override`
 
@@ -681,7 +739,12 @@ may be shared:
 - **A build identifies itself by `id`** where both the marker and the current config declare one,
   and by repo root path otherwise. With no `id`, a worktree therefore does not recognise the main
   checkout's output and declines to prune it — the conservative direction, and one more reason
-  invariant 5 wants `id` declared.
+  invariant 5 wants `id` declared, and it bites hardest where a worktree's targets were **copied**
+  in by `.worktreeinclude`: every one of those directories carries the main checkout's marker, so
+  with no `id` a build in that worktree prunes none of them and a removed template leaves its skill
+  there for the life of the worktree. It still *writes* them — a foreign marker is still a marker,
+  and only an unmarked directory is never overwritten — so this costs stale skills rather than
+  frozen ones.
 - If the source corpus could not be enumerated end to end, **nothing is pruned for that entire
   run** — a source root that did not resolve, one that cannot be read, a skill directory whose
   template cannot be read, or a skill directory that turned out to be a symlink *and* held a
@@ -777,12 +840,34 @@ absolute path would be committed, and would be wrong for every other clone on th
 group carries no `matcher`, so it runs for every session source — `resume` and `clear` can have
 output just as stale as `startup`.
 
-**A `git worktree` needs its own install.** `git worktree add` produces a tree with no
-`node_modules`, so the path above does not exist there and the hook fails at every session start
-— silently, because it is fail-soft. Overrides survive a worktree by design, since they are keyed
-on the declared `id` rather than on a path; the *hook* does not, and installing this package in
-the worktree is what fixes it. `init` warns when that file is missing, and does not vary the
-string it writes, which must stay byte-stable whatever is on disk today.
+**A worktree receives only what git tracks, which is none of this.** A worktree has no
+`node_modules`, so the path above does not exist there and the hook fails at every session start —
+silently, because it is fail-soft; and it has no compiled skills, which an install does not fix,
+because a skills directory that was not there when the session started is not picked up. Overrides
+survive a worktree by design, being keyed on the declared `id` rather than on a path, and so does a
+package named in `sources`, whose `node_modules` walk runs upward from the repo root and reaches
+the main checkout's install.
+
+For a worktree **Claude Code creates**, both halves are closed by the `.worktreeinclude` `init`
+writes: it names this package's directory and every in-repo target, and the copier brings across
+anything that matches a pattern there and is gitignored. See *The `.worktreeinclude` lines*. The
+limits are exact and each is a property of the mechanism rather than of this tool:
+
+- a worktree made by hand with `git worktree add` is created by nothing that reads
+  `.worktreeinclude`, and needs its own install;
+- a repo configured with a `WorktreeCreate` hook replaces worktree creation outright, which
+  disables the mechanism as a side effect;
+- a worktree entered **mid-session** is never reached, because `SessionStart` has already fired and
+  `$CLAUDE_PROJECT_DIR` deliberately stays at the directory the session was launched in — so the
+  hook, had it fired, would have built the main checkout;
+- the copy is a **snapshot**. Reinstall the tool in the main checkout and an existing worktree
+  keeps the bundle it was created with. The tool version is a stamp input, so that worktree
+  rebuilds rather than reporting output compiled by another version as fresh.
+
+`init` warns when the file the hook names is missing and says which of those remedies applies, and
+it does not vary the string it writes, which must stay byte-stable whatever is on disk today. Like
+the hook, `.worktreeinclude` is Claude Code only; the Codex equivalent of both is deferred
+together.
 
 1. **A content-hash stamp is compared first.** The hashed inputs are the tool version, the
    declared `id`, every configured root's spec *and* the path it resolved to, the config file's
@@ -853,7 +938,9 @@ string it writes, which must stay byte-stable whatever is on disk today.
    seed the same `id` and collide, and only a changed declaration separates them.
 6. **Nothing generated is tracked.** A convention `init` supports rather than a property the
    tool enforces: it offers the `.gitignore` lines and cannot do more (see *Not in the
-   contract*).
+   contract*). The `.worktreeinclude` lines are this invariant's counterpart — gitignored is
+   exactly what a worktree does not receive, so what this keeps out of the checkout has to be
+   named to be copied into one.
 7. **The tool never writes outside the repo it is run in, except to the configured override and
    target roots.**
 8. **No symlink is ever followed or copied, and none is followed silently.** What the tool checks
@@ -910,5 +997,7 @@ them.
 ## See Also
 
 - [`docs/decisions/0001-build-time-composition.md`](../decisions/0001-build-time-composition.md) — why
+- [`docs/decisions/0002-worktree-include.md`](../decisions/0002-worktree-include.md) — why a worktree
+  is given the tool and the compiled skills
 - [`docs/CONTEXT.md`](../CONTEXT.md) — glossary
 - [`docs/staging/qa-composable-skills-tooling.md`](../staging/qa-composable-skills-tooling.md) — evidence

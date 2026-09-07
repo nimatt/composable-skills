@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { unifiedDiff } from "../src/diff.ts";
 import { deriveId } from "../src/init.ts";
+import { OWNER_MARKER } from "../src/layout.ts";
 import { HOOK_COMMAND, invokesThisTool } from "../src/settings.ts";
 import { parseJsonc } from "../src/config.ts";
 import type { BuildRun } from "./fixtures/workspace.ts";
@@ -405,6 +406,20 @@ describe("init — .gitignore", () => {
     expect(read(ws.repo, ".gitignore")).toContain("\n/.composable-skills/\n");
   });
 
+  /**
+   * The whole of what "already covered" means here: the same pattern, with or without its
+   * anchoring `/` and its trailing one. Pinned because a loosening of it — reading `dir/**` as
+   * covering `/dir/` — was once made in passing while a *different* file's dedup was being
+   * written, and nothing in this suite noticed.
+   */
+  test("covered means the same pattern, not merely one that would ignore the same files", () => {
+    const ws = freshRepo({ ".gitignore": ".composable-skills/**\n" });
+
+    init(ws, { write: true });
+
+    expect(read(ws.repo, ".gitignore")).toContain("\n/.composable-skills/\n");
+  });
+
   test("a target outside the repo gets no ignore line, since no .gitignore governs it", () => {
     const ws = workspace({
       git: true,
@@ -415,6 +430,236 @@ describe("init — .gitignore", () => {
     const after = read(ws.repo, ".gitignore");
     expect(after).toContain("/.claude/skills/");
     expect(after).not.toContain("..");
+  });
+});
+
+/**
+ * The `.gitignore` step's twin, and downstream of it: Claude Code copies a file into a worktree it
+ * creates only where `.worktreeinclude` names it **and** git ignores it, which is exactly the set
+ * of paths the step above has just made gitignored. Without these lines a worktree has no tool for
+ * the hook to run, and no skills directory that existed when the session started.
+ */
+describe("init — .worktreeinclude", () => {
+  const OUTSIDE_TARGET_CONFIG = {
+    id: "acme",
+    sources: [],
+    targets: ["~/.claude/skills", "./.claude/skills"],
+  };
+
+  /** Every pattern the file states, in order; the `#` header lines are not patterns. */
+  function patternsOf(text: string): string[] {
+    return text.split("\n").filter((line) => line.startsWith("/"));
+  }
+
+  test("--write creates it, naming the tool's package directory and the in-repo target", () => {
+    const ws = freshRepo();
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(0);
+    expect(patternsOf(read(ws.repo, ".worktreeinclude"))).toEqual([
+      "/node_modules/composable-skills/**",
+      "/.claude/skills/**",
+      `/.claude/skills/**/${OWNER_MARKER}`,
+    ]);
+  });
+
+  /**
+   * The whole package directory, never `dist/` alone. The shipped bundle is ESM and what makes
+   * node read it as ESM is the `"type": "module"` in the `package.json` beside it — a `dist/`
+   * copied on its own throws `Cannot use import statement outside a module` at every session
+   * start, which is the same silent hook failure the lines are here to end.
+   */
+  test("the package directory comes across whole, not its dist alone", () => {
+    const ws = freshRepo();
+    init(ws, { write: true });
+
+    const after = read(ws.repo, ".worktreeinclude");
+    expect(after).toContain("/node_modules/composable-skills/**");
+    expect(after).not.toContain("composable-skills/dist");
+  });
+
+  /**
+   * The anti-freezing guarantee, asserted on its own so that a later edit cannot quietly drop it.
+   * A skill directory copied without its ownership marker is one no build in that worktree may
+   * ever write to or prune again: each one warns that it was not written by this tool and leaves
+   * the stale skill sitting in front of the model.
+   */
+  test("the ownership marker gets a pattern of its own beside the contents", () => {
+    const ws = freshRepo();
+    init(ws, { write: true });
+
+    expect(read(ws.repo, ".worktreeinclude")).toContain(`/.claude/skills/**/${OWNER_MARKER}`);
+  });
+
+  test("existing lines are kept exactly, and the new block is appended after them", () => {
+    const before = "dist/**\n.env\n";
+    const ws = freshRepo({ ".worktreeinclude": before });
+
+    const run = init(ws, { write: true });
+
+    const after = read(ws.repo, ".worktreeinclude");
+    expect(after.startsWith(before)).toBe(true);
+    expect(after).toContain("/node_modules/composable-skills/**");
+    expect(run.stdout).toContain(
+      "update  .worktreeinclude — appended — no existing line is rewritten",
+    );
+  });
+
+  test("a file with no trailing newline is not glued to the new block", () => {
+    const ws = freshRepo({ ".worktreeinclude": ".env" });
+    init(ws, { write: true });
+
+    expect(read(ws.repo, ".worktreeinclude").split("\n")[0]).toBe(".env");
+    expect(read(ws.repo, ".worktreeinclude")).not.toContain(".env#");
+  });
+
+  test("CRLF is preserved in the append", () => {
+    const ws = freshRepo({ ".worktreeinclude": "dist/**\r\n.env\r\n" });
+    init(ws, { write: true });
+
+    const after = read(ws.repo, ".worktreeinclude");
+    expect(after).toContain("/node_modules/composable-skills/**\r\n");
+    expect(after.split("\n").filter((line) => line !== "" && !line.endsWith("\r"))).toEqual([]);
+  });
+
+  /**
+   * Covered means the same pattern, spelled with or without its anchoring `/` — and nothing
+   * looser. This file is read by Claude Code's copier rather than by git, so `dir/` covering
+   * `dir/**` would be a claim about a matcher this repo does not own.
+   */
+  test("a file that already covers everything is not touched at all", () => {
+    const before = [
+      "node_modules/composable-skills/**",
+      "/.claude/skills/**",
+      `.claude/skills/**/${OWNER_MARKER}`,
+      "",
+    ].join("\n");
+    const ws = freshRepo({ ".worktreeinclude": before });
+
+    const run = init(ws, { write: true });
+
+    expect(read(ws.repo, ".worktreeinclude")).toBe(before);
+    expect(run.stdout).toContain(
+      "unchanged  .worktreeinclude — a worktree already gets the tool and the compiled skills",
+    );
+  });
+
+  /**
+   * The strict key, stated as the behaviour it buys. A redundant line is the whole cost of being
+   * too strict here; being too loose omits a line the worktree needs, and a worktree quietly
+   * missing its skills is the failure this feature exists to end.
+   */
+  test("a hand-written directory line covers neither the contents nor the marker", () => {
+    const ws = freshRepo({ ".worktreeinclude": ".claude/skills/\n" });
+
+    init(ws, { write: true });
+
+    const after = read(ws.repo, ".worktreeinclude");
+    expect(after.split("\n").filter((line) => line.includes(".claude/skills"))).toEqual([
+      ".claude/skills/",
+      "/.claude/skills/**",
+      `/.claude/skills/**/${OWNER_MARKER}`,
+    ]);
+  });
+
+  /** A dangling link never reaches the unreadable branch: the symlink verdict outranks it. */
+  test("a dangling symlink keeps the symlink verdict rather than the unreadable one", () => {
+    const ws = freshRepo();
+    symlink(path.join(ws.root, "nowhere"), ws.repo, ".worktreeinclude");
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain("is a symlink, so writing");
+    expect(run.stdout).not.toContain("exists but could not be read");
+    expect(exists(ws.root, "nowhere")).toBe(false);
+  });
+
+  test("two consecutive --write runs leave the file byte-identical", () => {
+    const ws = freshRepo();
+    init(ws, { write: true });
+    const after = read(ws.repo, ".worktreeinclude");
+
+    const second = init(ws, { write: true });
+
+    expect(read(ws.repo, ".worktreeinclude")).toBe(after);
+    expect(second.stdout).toContain("unchanged  .worktreeinclude");
+  });
+
+  test("a commented-out line does not count as covering anything", () => {
+    const ws = freshRepo({ ".worktreeinclude": "# node_modules/composable-skills/\n" });
+    init(ws, { write: true });
+
+    expect(read(ws.repo, ".worktreeinclude")).toContain("\n/node_modules/composable-skills/**\n");
+  });
+
+  test("a target outside the repo gets no pattern, since no worktree copy reaches it", () => {
+    const ws = workspace({ git: true, config: OUTSIDE_TARGET_CONFIG });
+
+    init(ws, { write: true });
+
+    expect(patternsOf(read(ws.repo, ".worktreeinclude"))).toEqual([
+      "/node_modules/composable-skills/**",
+      "/.claude/skills/**",
+      `/.claude/skills/**/${OWNER_MARKER}`,
+    ]);
+  });
+
+  test("the dry run prints the block it would write and writes nothing", () => {
+    const ws = freshRepo();
+    const before = snapshot(ws.root);
+
+    const dry = init(ws);
+
+    expect(snapshot(ws.root)).toEqual(before);
+    expect(dry.stdout).toContain("would create  .worktreeinclude");
+    expect(dry.stdout).toContain("+ /node_modules/composable-skills/**");
+    expect(dry.stdout).toContain(`+ /.claude/skills/**/${OWNER_MARKER}`);
+  });
+
+  test("a symlinked .worktreeinclude is refused rather than written through", () => {
+    const ws = freshRepo();
+    write(ws.root, { "elsewhere/worktreeinclude": ".env\n" });
+    symlink(path.join(ws.root, "elsewhere", "worktreeinclude"), ws.repo, ".worktreeinclude");
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain("is a symlink, so writing");
+    expect(read(ws.root, "elsewhere/worktreeinclude")).toBe(".env\n");
+    // The steps that stay inside the repo still apply — the refusal is this file's, not the run's.
+    expect(exists(ws.repo, "composable-skills.jsonc")).toBe(true);
+  });
+
+  test.skipIf(asRoot)("an unreadable .worktreeinclude is refused rather than replaced", () => {
+    const ws = freshRepo({ ".worktreeinclude": ".env\n" });
+    chmod(ws.repo, ".worktreeinclude", 0o000);
+
+    const run = init(ws, { write: true });
+
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain(
+      `${path.join(ws.repo, ".worktreeinclude")} exists but could not be read`,
+    );
+    chmod(ws.repo, ".worktreeinclude", 0o600);
+    expect(read(ws.repo, ".worktreeinclude")).toBe(".env\n");
+  });
+
+  /** The always-running twin: an injected read failure no uid is exempt from. */
+  test("the same file under an injected read failure keeps its bytes", () => {
+    const ws = freshRepo({ ".worktreeinclude": ".env\n" });
+    const target = path.join(ws.repo, ".worktreeinclude");
+
+    const { result: run, fired } = withFsFailures({ calls: ["readFileSync"], when: target }, () =>
+      init(ws, { write: true }),
+    );
+
+    expect(fired).toContain(`readFileSync ${target}`);
+    expect(run.code).toBe(1);
+    expect(run.stdout).toContain("refused  .worktreeinclude — exists but could not be read");
+    expect(run.stdout).not.toContain("create  .worktreeinclude");
+    expect(read(ws.repo, ".worktreeinclude")).toBe(".env\n");
   });
 });
 
@@ -600,8 +845,9 @@ describe("init — Yarn PnP", () => {
 
 /**
  * The PnP refusal's justification — written, never runs, never reported — reached by the ordinary
- * route: a repo that has not installed yet, or a fresh `git worktree`, which has no `node_modules`
- * of its own and so kills the hook at every session start with nothing downstream to say so.
+ * route: a repo that has not installed yet, or a `git worktree` made by hand, which has no
+ * `node_modules` of its own and so kills the hook at every session start with nothing downstream
+ * to say so.
  */
 describe("init — a hook that would never run", () => {
   const CLI_PATH = ["node_modules", "composable-skills", "dist", "cli.js"];
@@ -614,7 +860,11 @@ describe("init — a hook that would never run", () => {
     expect(hasWarning(run)).toBe(true);
     expect(run.stdout).toContain(`${path.join(ws.repo, ...CLI_PATH)} does not exist`);
     expect(run.stdout).toContain("would fail at every session start — silently");
-    expect(run.stdout).toContain("a fresh git worktree needs its own install");
+    // The remedy differs by which kind of worktree you are in, and the warning names both.
+    expect(run.stdout).toContain(
+      "the .worktreeinclude below carries the main checkout's install across",
+    );
+    expect(run.stdout).toContain("`git worktree add` is copied into by nothing and needs its own");
     // A warning, not a refusal: unlike PnP this is a state that ends by itself.
     expect(run.code).toBe(0);
   });

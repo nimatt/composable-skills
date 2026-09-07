@@ -116,10 +116,19 @@ _Avoid_: cache, lockfile
 
 **Session hook**:
 The `SessionStart` entry `init` writes into a consuming repo's tracked `.claude/settings.json`,
-running `build` at the start of every agent session; it resolves through `node_modules`, so each
-`git worktree` needs its own install — see
+running `build` at the start of every agent session; it resolves through `node_modules`, which a
+worktree does not have — closed for a worktree Claude Code creates by the **worktree include**,
+and by an install of its own for one made by hand. See
 [the spec's *`SessionStart` hook*](specs/tool-contract.md#the-sessionstart-hook).
 _Avoid_: the hook (ambiguous — Claude Code has many), git hook (rejected as the trigger)
+
+**Worktree include**:
+The `.worktreeinclude` at a consuming repo's root, in `.gitignore` syntax, naming what Claude Code
+should copy into a worktree it creates: the tool's own package directory and every in-repo
+**target**, contents and **marker**. Only a file that matches a pattern there *and* is gitignored
+is copied, which is what makes it the counterpart of the `.gitignore` lines rather than a second
+list — everything generated is on both. `init` writes it and nothing else in the tool reads it; the reader is Claude Code.
+_Avoid_: worktree config, include file (`include:` is a directive and means something else)
 
 **Delivery**:
 How a skills repo's skills reach another repo — its team's choice of clone-and-link or a wrapper
@@ -137,6 +146,8 @@ _Avoid_: distribution (used for how the *tool* reaches a repo, via npm)
   fills it, and the template's own default applies when none does.
 - **Template sources**, **overrides**, and **targets** are ordered lists in the **config file**;
   later entries win in the first two, and every target is written.
+- The **session hook** runs `build`; the **worktree include** is what puts the tool the hook names,
+  and the **targets** it writes, inside a worktree before its first session.
 
 ## Flagged ambiguities
 

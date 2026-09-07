@@ -78,8 +78,8 @@ jobs:
         # matrix never loads is a module the matrix cannot vouch for: `build` parses the config,
         # discovers the skill, compiles it through the slot and frontmatter machinery, emits it and
         # writes the stamp; `build --check` reads that stamp back; `override --dry-run` walks the
-        # override-root resolution chain; `init --dry-run` walks the settings, gitignore and diff
-        # path. Each exits 0 on a healthy tree, so `bash -e` fails the step on any non-zero.
+        # override-root resolution chain; `init --dry-run` walks the settings, gitignore,
+        # worktreeinclude and diff path. Each exits 0 on a healthy tree, so `bash -e` fails the step on any non-zero.
         run: |
           node "$GITHUB_WORKSPACE/dist/cli.js" --version
           node "$GITHUB_WORKSPACE/dist/cli.js" --help

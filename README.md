@@ -223,8 +223,9 @@ the `sources` walk makes work — a workspace child whose dependencies are hoist
 root — the source resolves while the hook silently never runs; declaring the dependency in the
 child does not stop npm hoisting it out. The same gap opens when the tool arrives only as a
 transitive dependency of the templates package. What matters is that the path above exists in the
-repo a session actually opens: `init` warns when it does not, and a fresh `git worktree` needs its
-own install for the same reason.
+repo a session actually opens: `init` warns when it does not. A worktree is the same gap reached by
+another route, where an install is only half the remedy — [*How it runs*](#how-it-runs) has that
+story.
 
 Both belong in `devDependencies`, and so does the check: **`--check` belongs in a dev install**,
 because a source the tool cannot use is an error, which makes a named source a hard dependency of
@@ -294,8 +295,9 @@ a tracked root is simply how a repo fills a slot for everyone who builds there.
 opposite directions on purpose. Both are specified in full in
 [the spec's *Public API*](docs/specs/tool-contract.md#public-api); this is the orientation.
 
-**`composable-skills init`** wires one repo up — the config file, the `.gitignore` lines, and the
-`SessionStart` hook entry — and is run once by whoever maintains the repo. It is **diff-first**:
+**`composable-skills init`** wires one repo up — the config file, the `.gitignore` lines, the
+`SessionStart` hook entry, and the `.worktreeinclude` lines that carry the first and the third into
+a worktree — and is run once by whoever maintains the repo. It is **diff-first**:
 it prints exactly what it would do to each file and writes nothing until you add `--write`. It
 merges rather than replaces, preserving unrelated keys, indent, line endings and file mode, and
 it is idempotent, so a second run reports there is nothing to do. Where it cannot be sure — a
@@ -393,11 +395,32 @@ committed and would be wrong for every other clone on the team. The string is by
 second reason too — Codex pins hook trust to its hash, so a string that changes re-prompts every
 developer, which is also why all the logic lives in the tool rather than in flags.
 
-**A `git worktree` needs its own install.** `git worktree add` produces a tree with no
-`node_modules`, so the path above does not exist there and the hook fails at every session start
-— silently, because it is fail-soft. Personal overrides *do* survive a worktree, being keyed on
-the declared `id` rather than on a path; the hook is the part that does not. `init` warns when
-that file is missing.
+**A worktree gets what git does not carry.** Everything this tool writes is gitignored, so a
+worktree starts with none of it: no `node_modules`, which is the one path the string above names,
+and no compiled skills — and an install alone fixes only the first, since a skills directory that
+was not there when the session started is not picked up whatever the hook does. `init` therefore
+writes a `.worktreeinclude` beside the `.gitignore`, naming this package's directory and every
+in-repo target. Claude Code copies a file into a worktree **it** creates where that file matches a
+pattern there *and* git ignores it, which is exactly this set, so the worktree opens with the tool
+where the hook looks and its skills already on disk. The whole package directory is named rather
+than its `dist/` alone — the bundle is ESM and it is the `"type": "module"` in the `package.json`
+beside it that makes node read it as such — and each target's ownership marker is named a second
+time on its own line, because a skill directory that arrives without one is a directory the build
+may never write to or prune again.
+
+Two things needed none of this. Personal overrides survive a worktree by being keyed on the
+declared `id` rather than on a path, and a `sources` package resolves there too: that walk runs
+*upward* through `node_modules` from the repo root, and these worktrees are nested inside the main
+checkout, so it reaches the main checkout's install.
+
+What it does not reach: a worktree made by hand with `git worktree add`, which Claude Code did not
+create and nothing copies into — that one still needs its own install, and `init` warns when the
+file is missing; a repo configured with a `WorktreeCreate` hook, which replaces worktree creation
+outright and disables the mechanism as a side effect; and a worktree entered mid-session, where
+`SessionStart` has already fired. The copy is also a snapshot: reinstall the tool in the main
+checkout and an existing worktree keeps the older bundle, which the stamp notices — the tool
+version is one of its inputs — so that worktree rebuilds rather than reporting stale output fresh.
+Like the hook itself, all of this is Claude Code only.
 
 This is the Claude Code hook. **The Codex equivalent is deliberately deferred**: a Codex target is
 written on every build, but nothing triggers that build automatically, so there `build` is still
@@ -426,12 +449,15 @@ not be read.
 One thing the hook cannot fix from inside a session: a harness does not pick up a skills
 directory that did not exist when the session started, so the first session after a fresh clone
 has no skills however early the build runs. `build` at least says so, naming any target directory
-it had to create and noting that those skills arrive in the next session.
+it had to create and noting that those skills arrive in the next session. A worktree Claude Code
+creates is no longer this case — its targets are copied in before it opens — but a fresh clone
+still is, since nothing precedes it to copy from.
 
 ## Documentation
 
 - [`docs/specs/tool-contract.md`](docs/specs/tool-contract.md) — the full contract
 - [`docs/decisions/0001-build-time-composition.md`](docs/decisions/0001-build-time-composition.md) — the rationale
+- [`docs/decisions/0002-worktree-include.md`](docs/decisions/0002-worktree-include.md) — how a worktree gets the tool and the skills
 - [`docs/CONTEXT.md`](docs/CONTEXT.md) — glossary
 
 ## License

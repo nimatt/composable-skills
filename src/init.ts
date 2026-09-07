@@ -7,7 +7,7 @@ import { describe, error, warning } from "./types.ts";
 import { isValidId, loadConfig } from "./config.ts";
 import { isUnder } from "./contain.ts";
 import { pathExists } from "./fsutil.ts";
-import { STATE_DIR } from "./layout.ts";
+import { OWNER_MARKER, STATE_DIR } from "./layout.ts";
 import { emitLines, emitReport } from "./report.ts";
 import { unifiedDiff } from "./diff.ts";
 import { CLI_REL, SETTINGS_REL, settingsStep } from "./settings.ts";
@@ -24,6 +24,7 @@ import { dominantEol, readIfPresent } from "./textfile.ts";
 
 export const CONFIG_REL = "composable-skills.jsonc";
 export const GITIGNORE_REL = ".gitignore";
+export const WORKTREEINCLUDE_REL = ".worktreeinclude";
 
 /** Yarn 2 wrote `.pnp.js`; Yarn 3+ writes `.pnp.cjs`. Either one means there is no `node_modules`. */
 export const PNP_FILENAMES = [".pnp.cjs", ".pnp.js"] as const;
@@ -134,17 +135,21 @@ export function runInit(options: InitOptions = {}): number {
   /**
    * The same failure the PnP refusal exists to prevent — a hook that is written, never runs, and
    * is never reported — reached by the ordinary route of not having installed yet, or of being in
-   * a fresh `git worktree`, which has no `node_modules` of its own. A warning rather than a
+   * a `git worktree` made by hand, which has no `node_modules` of its own. A warning rather than a
    * refusal, because unlike PnP this is a state that ends by itself, and it changes nothing about
-   * the command string: that must stay byte-stable whatever is on disk today.
+   * the command string: that must stay byte-stable whatever is on disk today. It now names a
+   * remedy, because the `.worktreeinclude` step below is one for the worktree half of it.
    */
   if (!pathExists(path.join(repoRoot, ...CLI_REL.split("/")))) {
     preflight.push(
       warning(
         `${path.join(repoRoot, ...CLI_REL.split("/"))} does not exist, so the SessionStart hook ` +
           "would fail at every session start — silently, because the hook is fail-soft. Install " +
-          "this package in this repo (a fresh git worktree needs its own install) and it starts " +
-          "working; the hook string is written the same either way, since it must stay stable.",
+          "this package here and it starts working. In a worktree Claude Code created, the " +
+          ".worktreeinclude below carries the main checkout's install across instead, so that is " +
+          "the install to do; one made by hand with `git worktree add` is copied into by nothing " +
+          "and needs its own. The hook string is written the same either way, since it must stay " +
+          "stable.",
       ),
     );
   }
@@ -211,6 +216,7 @@ export function planInit(config: Config, configDiagnostics: Diagnostic[] = []): 
     configStep(config),
     gitignoreStep(config, diagnostics),
     settingsStep(repoRoot, diagnostics),
+    worktreeincludeStep(config, diagnostics),
   ]
     .map((step) => refuseSymlinkedPath(step, repoRoot, diagnostics))
     .map((step) => refuseUnwritablePath(step, diagnostics));
@@ -366,6 +372,101 @@ function gitignoreStep(config: Config, diagnostics: Diagnostic[]): InitStep {
   };
 }
 
+/**
+ * Claude Code copies a file into a worktree it creates only where the file matches a
+ * `.worktreeinclude` pattern **and** git ignores it, so this file can speak about nothing but
+ * generated paths — which is every path that has to arrive by some route other than the checkout.
+ * Two of them:
+ *
+ * - the tool's own package directory, because `HOOK_COMMAND` names a literal path under the
+ *   project directory and walks no chain of its own. Absent there, the hook fails at every
+ *   session start, silently, because it is fail-soft.
+ * - every in-repo target, because a skills directory that was not there when the session started
+ *   is not picked up. A worktree whose targets arrive only when its own first build creates them
+ *   spends that entire first session with no skills, hook or no hook.
+ *
+ * Deliberately not a third: a package named in `sources` resolves in these worktrees already.
+ * `findPackageRoot` walks `node_modules` upward from the repo root, and every worktree this file
+ * governs is nested under the main checkout at `.claude/worktrees/`, so the walk reaches the main
+ * checkout's install. The one arrangement that puts a worktree somewhere else is a
+ * `WorktreeCreate` hook, which is also the one case where `.worktreeinclude` is not read at all —
+ * so there is no case in which copying a source package would help.
+ */
+function worktreeincludeStep(config: Config, diagnostics: Diagnostic[]): InitStep {
+  const target = path.join(config.repoRoot, WORKTREEINCLUDE_REL);
+  const read = readIfPresent(target);
+  /** The symlink verdict outranks this one, exactly as it does for the `.gitignore`. */
+  if (read.kind === "unreadable" && firstSymlinkComponent(config.repoRoot, target) === null) {
+    return unreadableRefusal(target, read.cause, diagnostics);
+  }
+  const before = read.kind === "present" ? read.text : null;
+
+  /**
+   * The whole package directory rather than `dist/` alone. The shipped bundle is ESM, and what
+   * makes node read it as ESM is the `"type": "module"` in the `package.json` beside it — copy
+   * `dist/` on its own and node throws `Cannot use import statement outside a module` before the
+   * build does anything at all.
+   *
+   * Taken by dropping `dist/cli.js` from the tail rather than by keeping the first two segments,
+   * which would be `node_modules/@acme` if this package were ever published under a scope — and
+   * would copy a whole npm scope into every worktree.
+   */
+  const wanted = [`/${CLI_REL.split("/").slice(0, -2).join("/")}/**`];
+  for (const root of config.targets) {
+    // A target outside the repo — `~/.claude/skills` is the blessed one — is not a path a worktree
+    // copy can reach, and not one this repo's .worktreeinclude can speak about.
+    if (!isUnder(config.repoRoot, root.path)) continue;
+    const rel = path.relative(config.repoRoot, root.path).split(path.sep).join("/");
+    /**
+     * The ownership marker gets a pattern of its own beside the contents. A skill directory that
+     * arrives without its marker is one this tool may never write to or prune again — every build
+     * in that worktree warns that it was not written by this tool and leaves it exactly as it is,
+     * so a stale skill sits in front of the model forever.
+     *
+     * The line is redundant today: `**` was measured matching the marker on Claude Code 2.1.263.
+     * It is kept because that behaviour is undocumented, and this copier's treatment of a
+     * wholly-ignored directory already changed once, at 2.1.239. So the line is insurance against
+     * drift rather than cover for ignorance, and what it insures against is permanent.
+     */
+    wanted.push(`/${rel}/**`, `/${rel}/**/${OWNER_MARKER}`);
+  }
+
+  const covered = new Set(
+    (before ?? "").split("\n").filter(statesAPattern).map(worktreeIncludeKey),
+  );
+  const missing = [...new Set(wanted)].filter((entry) => !covered.has(worktreeIncludeKey(entry)));
+
+  /**
+   * `wanted` always holds the package directory, so a file that covers everything had to exist to
+   * cover it — there is no "nothing to carry across" case to describe.
+   */
+  if (missing.length === 0) {
+    return {
+      path: target,
+      before,
+      after: null,
+      note: "a worktree already gets the tool and the compiled skills — no line was touched",
+    };
+  }
+
+  const eol = before === null ? "\n" : dominantEol(before);
+  const block = [
+    "# composable-skills — the tool and its compiled skills, so a worktree Claude Code creates",
+    "# has both in its first session. Only gitignored files are copied, which is all of these.",
+    ...missing,
+  ];
+  const appended = `${block.join(eol)}${eol}`;
+  const after =
+    before === null ? appended : `${before}${before.endsWith("\n") ? "" : eol}${eol}${appended}`;
+
+  return {
+    path: target,
+    before,
+    after,
+    note: before === null ? "created" : "appended — no existing line is rewritten",
+  };
+}
+
 /** A comment or a blank states no pattern, so it covers nothing. */
 function statesAPattern(line: string): boolean {
   const trimmed = line.trim();
@@ -375,6 +476,23 @@ function statesAPattern(line: string): boolean {
 /** The anchoring `/` is not part of what a line matches. */
 function ignoreKey(line: string): string {
   return line.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+/**
+ * Deliberately stricter than `ignoreKey`, which is why it is a second function rather than an
+ * argument to that one. Both files are in gitignore syntax, but only one of them is read by git:
+ * a `.worktreeinclude` is read by Claude Code's copier, so `dir/` covering `dir/**` is a claim
+ * about a matcher this repo does not own and has never tested. Git's own equivalence comes from
+ * pruning the tree during traversal; a copier that enumerates candidate files and tests each path
+ * could just as reasonably read `dir/` as naming the directory alone.
+ *
+ * The failure modes decide it. A key that is too strict costs a redundant line in a file nobody
+ * reads twice. A key that is too loose omits a line the worktree needs, and the result is a
+ * worktree quietly missing its tool or its skills — which is the exact silent breakage this whole
+ * feature exists to end.
+ */
+function worktreeIncludeKey(line: string): string {
+  return line.trim().replace(/^\/+/, "");
 }
 
 /**
