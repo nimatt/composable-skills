@@ -105,7 +105,8 @@ _Avoid_: lock file, manifest (it records one directory's ownership, not a list o
 The record of the last real build — a content hash of the tool version, the declared `id`, every
 configured root and the path it resolved to, the config file, and every source and override
 tree, plus which skills failed, their diagnostics, and **one outcome per skill per target**: a
-hash of the `SKILL.md` written there, or a decline where the target held something that was not
+hash of the `SKILL.md` and a list of every emitted file with its byte hash and permission bits,
+or a decline where the target held something that was not
 this build's to replace. Kept with the build log in the `.composable-skills/` state directory at
 the consuming repo's root. A matching hash gates a rebuild only where the recorded outcomes still
 hold — every recorded hash re-read and unchanged, every recorded decline still facing a non-owned

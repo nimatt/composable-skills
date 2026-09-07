@@ -178,7 +178,7 @@ describe("init — the hook command string", () => {
     };
 
     expect(settings.hooks.SessionStart).toHaveLength(1);
-    expect(settings.hooks.SessionStart[0]!.hooks).toEqual([
+    expect(settings.hooks.SessionStart[0]?.hooks).toEqual([
       { type: "command", command: HOOK_COMMAND },
     ]);
   });
@@ -1240,7 +1240,7 @@ describe("init — the config survives its own invitation", () => {
         const match = /^(\s*)\/\/ ("[^"]+"\s*:.*)$/.exec(line);
         if (match === null) return line;
         seen++;
-        return which.includes(seen) ? `${match[1]!}${match[2]!}` : line;
+        return which.includes(seen) ? `${match[1] ?? ""}${match[2] ?? ""}` : line;
       })
       .join("\n");
   }

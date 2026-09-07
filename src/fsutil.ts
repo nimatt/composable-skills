@@ -87,8 +87,17 @@ export interface NoFollowWrite {
 export function openForWriteNoFollow(file: string, mode: number): NoFollowWrite {
   const removedSymlink = unlinkIfSymlink(file);
   const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | noFollow;
-  return { handle: fs.openSync(file, flags, mode), removedSymlink };
+  const flags =
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | noFollow | (fs.constants.O_NONBLOCK ?? 0);
+  const handle = fs.openSync(file, flags, mode);
+  try {
+    if (!fs.fstatSync(handle).isFile()) throw new Error(`not a regular file: ${file}`);
+    fs.ftruncateSync(handle, 0);
+    return { handle, removedSymlink };
+  } catch (cause) {
+    fs.closeSync(handle);
+    throw cause;
+  }
 }
 
 function unlinkIfSymlink(file: string): boolean {
@@ -99,4 +108,20 @@ function unlinkIfSymlink(file: string): boolean {
   }
   fs.unlinkSync(file);
   return true;
+}
+
+/** Nonblocking open and descriptor validation also reject a FIFO swapped in after lstat. */
+export function readRegularFile(file: string): { bytes: Buffer; mode: number } {
+  if (!fs.lstatSync(file).isFile()) throw new Error(`not a regular file: ${file}`);
+  const handle = fs.openSync(
+    file,
+    fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const stat = fs.fstatSync(handle);
+    if (!stat.isFile()) throw new Error(`not a regular file: ${file}`);
+    return { bytes: fs.readFileSync(handle), mode: stat.mode & 0o777 };
+  } finally {
+    fs.closeSync(handle);
+  }
 }

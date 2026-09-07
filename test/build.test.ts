@@ -337,7 +337,6 @@ describe("the fresh-clone notice", () => {
 
 describe("a build that failed keeps saying so until it is repaired", () => {
   const BROKEN = "---\nname: rep\n---\n\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\n";
-  const SENTINEL = "SENTINEL — the tool did not run\n";
   const STEADY_EXTRA = "Steady notes.\n";
 
   test("the third run replays the error, --check still fails, and a repair reaches the target", () => {
@@ -358,18 +357,14 @@ describe("a build that failed keeps saying so until it is repaired", () => {
     expect(hasError(second)).toBe(true);
     expect(compiled(ws, "rep")).toContain("Good one.");
 
-    // Third run, inputs unchanged. The failed build still stamped, so this run is gated — and a
-    // gated run replays what the last real build said instead of passing in silence. The probe for
-    // "nothing was compiled" is `steady`'s copied extra, not its SKILL.md: overwriting SKILL.md is
-    // the tamper the gate detects, and would force the very rebuild this asserts did not happen.
-    write(ws.repo, { ".claude/skills/steady/notes.txt": SENTINEL });
+    // Unchanged inputs and outputs replay the previous diagnostics without compilation.
     const third = build(ws);
     expect(third.code).toBe(0);
     expect(hasError(third)).toBe(true);
     expect(third.stdout).toContain("merge-conflict marker");
     // and it says so as stored text, never as something this run observed
     expect(third.stdout).toContain("[last build] merge-conflict marker");
-    expect(read(ws.repo, ".claude/skills/steady/notes.txt")).toBe(SENTINEL);
+    expect(read(ws.repo, ".claude/skills/steady/notes.txt")).toBe(STEADY_EXTRA);
     expect(compiled(ws, "steady")).toBe("---\nname: steady\n---\n\nSteady.\n");
     expect(compiled(ws, "rep")).toContain("Good one.");
 
@@ -523,12 +518,11 @@ describe("stamp gate", () => {
     expect(compiled(ws, "s")).toContain("Override one.");
     expect(read(ws.repo, COMPILED_EXTRA)).toBe(EXTRA_TEXT);
 
-    write(ws.repo, { [COMPILED_EXTRA]: SENTINEL });
     const second = build(ws);
     expect(second.code).toBe(0);
     expect(second.stdout).toBe("");
-    // untouched: no staging directory was swapped into place, so nothing rewrote the extra
-    expect(read(ws.repo, COMPILED_EXTRA)).toBe(SENTINEL);
+    // The unchanged output remains available on the gated path.
+    expect(read(ws.repo, COMPILED_EXTRA)).toBe(EXTRA_TEXT);
     expect(compiled(ws, "s")).toContain("Override one.");
     expect(targetEntries(ws.repo)).toEqual(["s"]);
   });
@@ -597,8 +591,6 @@ describe("stamp gate", () => {
 });
 
 describe("stamp inputs beyond the file trees", () => {
-  /** Same probe as the stamp-gate tests: a copied extra, which the output check does not hash. */
-  const SENTINEL = "SENTINEL — the tool did not run\n";
   const EXTRA_TEXT = "From the template.\n";
 
   function versionWorkspace() {
@@ -615,12 +607,11 @@ describe("stamp inputs beyond the file trees", () => {
 
     build(ws, { version: "1.0.0" });
     expect(read(ws.repo, ".claude/skills/v/notes.txt")).toBe(EXTRA_TEXT);
-    write(ws.repo, { ".claude/skills/v/notes.txt": SENTINEL });
 
     const same = build(ws, { version: "1.0.0" });
     expect(same.code).toBe(0);
     expect(same.stdout).toBe("");
-    expect(read(ws.repo, ".claude/skills/v/notes.txt")).toBe(SENTINEL);
+    expect(read(ws.repo, ".claude/skills/v/notes.txt")).toBe(EXTRA_TEXT);
 
     build(ws, { version: "1.1.0" });
     expect(read(ws.repo, ".claude/skills/v/notes.txt")).toBe(EXTRA_TEXT);
@@ -631,11 +622,10 @@ describe("stamp inputs beyond the file trees", () => {
     const ws = versionWorkspace();
 
     build(ws);
-    write(ws.repo, { ".claude/skills/v/notes.txt": SENTINEL });
     const gated = build(ws);
     expect(gated.code).toBe(0);
     expect(gated.stdout).toBe("");
-    expect(read(ws.repo, ".claude/skills/v/notes.txt")).toBe(SENTINEL);
+    expect(read(ws.repo, ".claude/skills/v/notes.txt")).toBe(EXTRA_TEXT);
 
     write(ws.repo, {
       "composable-skills.jsonc": `${JSON.stringify(
@@ -689,7 +679,7 @@ describe("the stamp gate verifies its outputs", () => {
   // The deliberate limit on that check, and the reason it is affordable: a `references/` tree
   // dominates corpus bytes, so re-reading one at every session start would put back exactly the
   // cost the stamp exists to avoid. Only `SKILL.md` is hashed.
-  test("a compiled extra is deliberately not hashed", () => {
+  test("editing a compiled extra forces a rebuild", () => {
     const ws = hashWorkspace();
     build(ws);
 
@@ -697,8 +687,8 @@ describe("the stamp gate verifies its outputs", () => {
 
     const run = build(ws);
     expect(run.code).toBe(0);
-    expect(run.stdout).toBe("");
-    expect(read(ws.repo, ".claude/skills/h/references/guide.md")).toBe("Edited by hand.\n");
+    expect(run.stdout).toContain("1 skill → 1 target");
+    expect(read(ws.repo, ".claude/skills/h/references/guide.md")).toBe("A guide.\n");
     expect(build(ws, { check: true }).code).toBe(0);
   });
 
@@ -770,8 +760,9 @@ describe("a forged stamp", () => {
   /** The outcome a real build recorded for one skill, so a forgery can carry it through verbatim. */
   function realOutcome(ws: Workspace, skill: string): TargetOutcome {
     const outcome = storedStamp(ws).outputs[skill]?.[targetOf(ws)];
-    expect(outcome).toEqual({ outcome: "written", hash: expect.any(String) });
-    return outcome!;
+    expect(outcome).toMatchObject({ outcome: "written", hash: expect.any(String) });
+    if (outcome === undefined) throw new Error("missing outcome");
+    return outcome;
   }
 
   /** Keeps the stamp's own input hash — which anyone who can write the file can copy — and rewrites the rest. */
@@ -918,7 +909,11 @@ describe("write containment", () => {
         return original.copyFileSync(from, to, mode);
       }) as typeof fs.copyFileSync;
       fs.openSync = ((p: never, flags: never, mode: never) => {
-        note(p);
+        if (
+          typeof flags === "number" &&
+          (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) !== 0
+        )
+          note(p);
         return original.openSync(p, flags, mode);
       }) as typeof fs.openSync;
       run = build(ws);
@@ -944,7 +939,7 @@ describe("write containment", () => {
     );
     expect(staged.length).toBeGreaterThan(0);
     // and the compiled file really was written into that staging directory, not into the target
-    expect(touched).toContain(path.join(staged[0]!, "SKILL.md"));
+    expect(touched).toContain(path.join(staged[0] ?? "missing staging directory", "SKILL.md"));
     expect(touched).not.toContain(path.join(targetDir, "w", "SKILL.md"));
     // The two state-dir writes go to a descriptor, so they are only visible here through the
     // `open` that produced it. They are the paths a planted symlink once redirected out of the
@@ -1078,11 +1073,11 @@ describe("line endings", () => {
     expect(out).toBe("---\nname: crlf\n---\n\nBefore.\n\nOverride line one.\nOverride line two.\n");
   });
 
-  test("switching a checkout between CRLF and LF does not make the stamp flap", () => {
+  test("switching checkout line endings conservatively rebuilds unchanged compiled text", () => {
     const ws = workspace({
       repoFiles: {
         "templates/crlf/SKILL.md.tmpl": CRLF_TEMPLATE,
-        // an extra too, so the stamp's EOL normalisation is pinned over copied files as well
+        // Verbatim extras must retain their exact source bytes.
         "templates/crlf/notes.txt": "Note one.\r\nNote two.\r\n",
         ".claude/skills-local/crlf/body.md": "Override text.\r\n",
       },
@@ -1091,10 +1086,6 @@ describe("line endings", () => {
     build(ws);
     const stampAfterCrlf = read(ws.repo, ".composable-skills/stamp");
 
-    // the probe lives outside SKILL.md: overwriting SKILL.md is the tamper the gate detects, and
-    // would force the rebuild this test exists to disprove
-    const sentinel = "SENTINEL — the tool did not run\n";
-    write(ws.repo, { ".claude/skills/crlf/notes.txt": sentinel });
     write(ws.repo, {
       "templates/crlf/SKILL.md.tmpl": LF_TEMPLATE,
       "templates/crlf/notes.txt": "Note one.\nNote two.\n",
@@ -1103,9 +1094,9 @@ describe("line endings", () => {
 
     const second = build(ws);
     expect(second.code).toBe(0);
-    expect(second.stdout).toBe("");
-    expect(read(ws.repo, ".claude/skills/crlf/notes.txt")).toBe(sentinel);
-    expect(read(ws.repo, ".composable-skills/stamp")).toBe(stampAfterCrlf);
+    expect(second.stdout).toContain("1 skill → 1 target");
+    expect(read(ws.repo, ".claude/skills/crlf/notes.txt")).toBe("Note one.\nNote two.\n");
+    expect(read(ws.repo, ".composable-skills/stamp")).not.toBe(stampAfterCrlf);
   });
 });
 
@@ -1469,11 +1460,11 @@ describe("prune and ownership", () => {
 
     // Injected rather than `chmod`'d: mode 000 stops nobody running as uid 0, which most CI
     // images do. `fired` is what says the failure the test asked for is the one that happened.
-    const { result: run, fired } = withFsFailures({ calls: ["statSync"], when: template }, () =>
+    const { result: run, fired } = withFsFailures({ calls: ["lstatSync"], when: template }, () =>
       build(ws),
     );
 
-    expect(fired).toContain(`statSync ${template}`);
+    expect(fired).toContain(`lstatSync ${template}`);
     expect(run.code).toBe(0);
     expect(run.stdout).toContain(`cannot read template ${template}: permission or I/O error`);
     expect(run.stdout).toContain("nothing was pruned this run");

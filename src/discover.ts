@@ -41,10 +41,8 @@ export function discoverSkills(config: Config): Discovery {
        * template from outside every configured source root, but never silently.
        */
       if (entry.isSymbolicLink()) {
-        if (
-          probeFile(path.join(dir, TEMPLATE_FILENAME)) === "file" ||
-          looksLikeSkill(dir) === "yes"
-        ) {
+        const template = probeFile(path.join(dir, TEMPLATE_FILENAME));
+        if (template === "file" || template === "symlink" || looksLikeSkill(dir) === "yes") {
           diagnostics.push(
             warning(`skill directory is a symlink — not followed`, {
               skill: entry.name,
@@ -58,6 +56,16 @@ export function discoverSkills(config: Config): Discovery {
       if (!entry.isDirectory()) continue;
       const templatePath = path.join(dir, TEMPLATE_FILENAME);
       const template = probeFile(templatePath);
+      if (template === "symlink") {
+        diagnostics.push(
+          error(`template is a symlink — not followed`, {
+            skill: entry.name,
+            file: templatePath,
+          }),
+        );
+        complete = false;
+        continue;
+      }
       if (template === "unreadable") {
         diagnostics.push(
           warning(`cannot read template ${templatePath}: permission or I/O error — skipped`, {
@@ -121,7 +129,7 @@ function looksLikeSkill(dir: string): Probe {
   }
 }
 
-type FileProbe = "file" | "other" | "missing" | "unreadable";
+type FileProbe = "file" | "symlink" | "other" | "missing" | "unreadable";
 
 /**
  * `ENOENT` is "there is no skill here" and every other errno is "this build cannot see whether
@@ -130,7 +138,9 @@ type FileProbe = "file" | "other" | "missing" | "unreadable";
  */
 function probeFile(candidate: string): FileProbe {
   try {
-    return fs.statSync(candidate).isFile() ? "file" : "other";
+    const stats = fs.lstatSync(candidate);
+    if (stats.isSymbolicLink()) return "symlink";
+    return stats.isFile() ? "file" : "other";
   } catch (cause) {
     return isMissing(cause) ? "missing" : "unreadable";
   }

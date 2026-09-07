@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { runBuild } from "../../src/build.ts";
+import { CONFIG_FILENAMES } from "../../src/config.ts";
 import { runInit } from "../../src/init.ts";
 import { runOverride } from "../../src/override.ts";
 
@@ -17,7 +18,62 @@ const created: string[] = [];
  */
 const chmodded: string[] = [];
 
+/**
+ * Everything a verb derives from the environment is redirected below, so no `${home}` root can
+ * reach the developer's own files. The upward *filesystem* walk is the same leak through a
+ * different mechanism, and nothing redirects it: `findConfigFile` and `findRepoRoot` climb from the
+ * repo until they meet a `.git`, and a workspace built without one has nothing to stop them, so
+ * they leave the temp directory and keep going. Whatever sits above `os.tmpdir()` then decides what
+ * the fixture's own tests observe — a `composable-skills.jsonc` there becomes the config every
+ * `config: null` workspace resolves, and a `.git` there becomes the repo root every workspace
+ * without one reports.
+ *
+ * That is not hypothetical. Running a verb with the working directory set to `/tmp` leaves exactly
+ * such a config behind, and the tests that then fail name the tool and a path inside the tool
+ * rather than the file responsible, which is expensive to chase and easy to misread as a bug in the
+ * code under test.
+ *
+ * It cannot be fenced off, only detected: `.git` is the sole thing that halts either walk, and
+ * planting one above the workspace would make `findRepoRoot` return that ancestor, which is the
+ * behaviour a `git: false` workspace exists to test. So the precondition is checked once and the
+ * offending path is named, rather than being enforced.
+ */
+export function strayAncestors(startDir: string): string[] {
+  const found: string[] = [];
+  let dir = startDir;
+  for (;;) {
+    for (const name of [...CONFIG_FILENAMES, ".git"]) {
+      const candidate = path.join(dir, name);
+      if (fs.existsSync(candidate)) found.push(candidate);
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return found;
+    dir = parent;
+  }
+}
+
+/**
+ * The walk is cached, but the refusal is not: every workspace a polluted run tries to create fails
+ * the same way. Reporting once and then letting the rest of the suite proceed would put the results
+ * it was built to distrust back in front of the reader, under a green-looking summary.
+ */
+let stray: string[] | null = null;
+
+function assertNothingShadowsTheTempDirectory(): void {
+  stray ??= strayAncestors(fs.realpathSync(os.tmpdir()));
+  if (stray.length === 0) return;
+  throw new Error(
+    `the test fixture cannot trust its workspaces: ${stray.length === 1 ? "a path" : "paths"} at or ` +
+      `above ${os.tmpdir()}, where every workspace is created, ${stray.length === 1 ? "is" : "are"} ` +
+      `visible to the upward search that resolves a config and a repo root:\n\n  ${stray.join("\n  ")}\n\n` +
+      "A config there is resolved by every workspace built with `config: null`, and a `.git` there " +
+      "becomes the repo root of every workspace built without one, so the suite would report " +
+      "failures that belong to those paths rather than to the code. Remove them and run again.",
+  );
+}
+
 function tempDir(): string {
+  assertNothingShadowsTheTempDirectory();
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "composable-skills-test-")));
   created.push(dir);
   return dir;
@@ -410,7 +466,36 @@ function captured(
 
   const originalOut = process.stdout.write;
   const originalErr = process.stderr.write;
+  // A config-less fixture must not discover a real checkout or config above its temporary
+  // directory. Keep discovery inside the fixture while preserving its own ancestor layouts.
+  const outsideDiscovery = new Set<string>();
+  if (homedir !== null) {
+    let ancestor = path.dirname(path.dirname(homedir));
+    for (;;) {
+      for (const name of [".git", "composable-skills.jsonc", "composable-skills.json"]) {
+        outsideDiscovery.add(path.join(ancestor, name));
+      }
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) break;
+      ancestor = parent;
+    }
+  }
+  const outside = (candidate: unknown): boolean =>
+    typeof candidate === "string" && outsideDiscovery.has(path.resolve(candidate));
+  const originalExists = fs.existsSync;
+  const originalStat = fs.statSync;
   const restore = [
+    force(fs, "existsSync", (candidate: fs.PathLike) =>
+      outside(candidate) ? false : originalExists(candidate),
+    ),
+    force(fs, "statSync", (...args: Parameters<typeof fs.statSync>) => {
+      if (outside(args[0])) {
+        const missing: NodeJS.ErrnoException = new Error("outside the test workspace");
+        missing.code = "ENOENT";
+        throw missing;
+      }
+      return originalStat(...args);
+    }),
     force(process.stdout, "fd", capture.outFd),
     force(process.stderr, "fd", capture.errFd),
     /**

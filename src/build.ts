@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { Diagnostic } from "./types.ts";
 import { describe, error, warning } from "./types.ts";
 import { loadConfig } from "./config.ts";
@@ -15,6 +16,7 @@ import {
   outputsVerified,
   previouslyCompiled,
   readStamp,
+  snapshotOutput,
   writeStamp,
 } from "./stamp.ts";
 import { emitSkill, pruneTarget } from "./emit.ts";
@@ -154,8 +156,30 @@ export function runBuild(options: BuildOptions): number {
         for (const target of config.targets) {
           const outcome = emitSkill(target, result.compiled, config, diagnostics);
           if (outcome === "written") {
-            recorded[target.path] = { outcome: "written", hash };
             written = true;
+            /**
+             * The skill is on disk by now, so a manifest this run cannot take is a gap in the
+             * record and not a failed skill. Leaving the target unrecorded is what the gap should
+             * cost: `outputsVerified` does not vouch for output no outcome claims, so the next run
+             * finds it stale and writes it again — where recording the write without its manifest
+             * would gate on a claim nothing had checked, and throwing would both mislabel a skill
+             * that succeeded and abandon the targets after this one.
+             */
+            try {
+              recorded[target.path] = {
+                outcome: "written",
+                hash,
+                files: snapshotOutput(path.join(target.path, skill.name)),
+              };
+            } catch (cause) {
+              diagnostics.push(
+                warning(
+                  `wrote ${skill.name} to ${target.path} but could not record what was ` +
+                    `written: ${describe(cause)} — it will be compiled again next run`,
+                  { skill: skill.name },
+                ),
+              );
+            }
           } else if (outcome === "declined") {
             recorded[target.path] = { outcome: "declined" };
           } else {

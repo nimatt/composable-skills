@@ -5,7 +5,13 @@ import path from "node:path";
 import type { Config } from "./types.ts";
 import { describe } from "./types.ts";
 import { stateDir } from "./layout.ts";
-import { ensureRealDir, pathExists, removeQuietly, uniqueSuffix } from "./fsutil.ts";
+import {
+  ensureRealDir,
+  pathExists,
+  readRegularFile,
+  removeQuietly,
+  uniqueSuffix,
+} from "./fsutil.ts";
 
 const LOCK_DIRNAME = "lock";
 const LOCK_INFO_FILENAME = "info.json";
@@ -91,7 +97,9 @@ function releaseBuildLock(directory: string, token: string): void {
 function readLockInfo(directory: string): LockInfo | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(fs.readFileSync(path.join(directory, LOCK_INFO_FILENAME), "utf8"));
+    parsed = JSON.parse(
+      readRegularFile(path.join(directory, LOCK_INFO_FILENAME)).bytes.toString("utf8"),
+    );
   } catch {
     return null;
   }

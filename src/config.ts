@@ -758,11 +758,14 @@ function resolveRoots(
     }
 
     if (spec.includes("${home}")) {
-      const outside = homeEscape(home, resolved);
-      if (outside !== null) {
-        diagnostics.push(error(`${kind} "${spec}" ${outside} — skipped`));
+      const verdict = homeContainment(home, resolved);
+      if (verdict.kind === "escape") {
+        diagnostics.push(error(`${kind} "${spec}" ${verdict.message} — skipped`));
         unusable++;
         continue;
+      }
+      if (verdict.kind === "unverifiable") {
+        diagnostics.push(warning(`${kind} "${spec}" ${verdict.message}`));
       }
     }
 
@@ -789,23 +792,86 @@ function resolveRoots(
  * alone is what `rejectSymlinkedRoot` exists to cover for an override root at read time; asked here
  * it covers a source root, which is exempt from that option because a symlinked package root is
  * ordinary, and a target root, which is written through before anything `lstat`s it.
+ *
+ * The third verdict is the one `contain.ts` draws everywhere else: *outside* and *cannot be seen*
+ * are different answers. A path this process may not traverse is also one it may not read a
+ * template from, splice an override out of, or write a target into — every consumer resolves it
+ * again and fails closed with a message naming itself — so rejecting the root here would trade
+ * that precise diagnostic for a config error, and would fail `build --check` over a `chmod`
+ * standing above a root rather than over anything stale.
  */
-function homeEscape(home: string, resolved: string): string | null {
-  if (!isAtOrUnder(home, resolved)) return `resolves to ${resolved}, outside ${home}`;
-  const real = canonicalPath(resolved);
-  if (isAtOrUnder(canonicalPath(home), real)) return null;
-  return `resolves to ${resolved}, which leads through a symlink to ${real}, outside ${home}`;
+type HomeVerdict =
+  | { kind: "contained" }
+  | { kind: "escape"; message: string }
+  | { kind: "unverifiable"; message: string };
+
+function homeContainment(home: string, resolved: string): HomeVerdict {
+  if (!isAtOrUnder(home, resolved)) {
+    return { kind: "escape", message: `resolves to ${resolved}, outside ${home}` };
+  }
+  try {
+    const real = canonicalPath(resolved);
+    if (isAtOrUnder(canonicalPath(home), real)) return { kind: "contained" };
+    return {
+      kind: "escape",
+      message: `resolves to ${resolved}, which leads through a symlink to ${real}, outside ${home}`,
+    };
+  } catch (cause) {
+    if (cause instanceof Indeterminate && cause.reason === "unreadable") {
+      return {
+        kind: "unverifiable",
+        message:
+          `resolves to ${resolved}, which this build cannot check against ${home}: ` +
+          `${cause.message} — kept, and re-checked wherever it is read or written`,
+      };
+    }
+    return {
+      kind: "escape",
+      message:
+        `resolves to ${resolved}, which leads through a symlink whose destination is not there ` +
+        `yet, so it cannot be shown to stay under ${home}`,
+    };
+  }
 }
 
 /**
- * Real path where the path exists, resolved text where it does not. A target root usually does not
- * exist yet on a first run, so `realpathSync` throws on it.
+ * Why a real location could not be established, which is two answers rather than one. A link whose
+ * destination is not there yet may come to point anywhere, so containment is undecided in a way
+ * only the config can refuse. A component this process may not traverse leaves containment equally
+ * undecided, but is also a component nothing can be read from or written through, so every
+ * consumer that touches the root resolves it again and fails closed naming itself.
  */
+class Indeterminate extends Error {
+  constructor(
+    readonly reason: "dangling" | "unreadable",
+    cause: unknown,
+  ) {
+    super(describe(cause));
+  }
+}
+
+/** Resolve existing ancestors before appending missing components of a first-run target. */
 function canonicalPath(candidate: string): string {
-  try {
-    return fs.realpathSync(candidate);
-  } catch {
-    return path.resolve(candidate);
+  let ancestor = path.resolve(candidate);
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(ancestor), ...missing);
+    } catch (cause) {
+      if (!isMissing(cause)) throw new Indeterminate("unreadable", cause);
+      // A dangling link is not a missing directory: its eventual destination is unknown.
+      let stats: fs.Stats | undefined;
+      try {
+        stats = fs.lstatSync(ancestor, { throwIfNoEntry: false });
+      } catch (probeCause) {
+        if (!isMissing(probeCause)) throw new Indeterminate("unreadable", probeCause);
+      }
+      if (stats) throw new Indeterminate("dangling", cause);
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw new Indeterminate("dangling", cause);
+      missing.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
   }
 }
 
@@ -815,7 +881,11 @@ function canonicalPath(candidate: string): string {
  */
 function rootContains(root: string, candidate: string): boolean {
   if (isAtOrUnder(path.resolve(root), path.resolve(candidate))) return true;
-  return isAtOrUnder(canonicalPath(root), canonicalPath(candidate));
+  try {
+    return isAtOrUnder(canonicalPath(root), canonicalPath(candidate));
+  } catch {
+    return false;
+  }
 }
 
 function firstOutputInside(root: Root, config: Config): string | null {

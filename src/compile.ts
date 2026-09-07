@@ -54,9 +54,18 @@ export function compileSkill(skill: DiscoveredSkill, config: Config): CompileRes
     );
   };
 
+  const template = resolveContainedFile(
+    skill.sourceRoot,
+    path.relative(skill.sourceRoot, skill.templatePath).split(path.sep),
+  );
+  if ("failure" in template) {
+    fail(`cannot read template safely: ${template.failure.kind}`);
+    return abort();
+  }
+
   let raw: string;
   try {
-    raw = normaliseEol(fs.readFileSync(skill.templatePath, "utf8"));
+    raw = normaliseEol(fs.readFileSync(template.path, "utf8"));
   } catch (cause) {
     fail(`cannot read template: ${describe(cause)}`);
     return abort();
@@ -294,7 +303,12 @@ function collectExtras(skill: DiscoveredSkill, diagnostics: Diagnostic[]): Extra
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch (cause) {
-      diagnostics.push(warning(`cannot read ${dir}: ${describe(cause)}`, { skill: skill.name }));
+      diagnostics.push(
+        error(`cannot enumerate supporting files: ${describe(cause)}`, {
+          skill: skill.name,
+          file: dir,
+        }),
+      );
       return;
     }
     for (const entry of entries) {

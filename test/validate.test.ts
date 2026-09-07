@@ -849,11 +849,13 @@ describe("diagnostic locations", () => {
     expect(lines(run)).toContain(formatted);
 
     const located = /^composable-skills: error \[\S+ (.+):(\d+)\] /.exec(formatted);
-    if (located === null) throw new Error(`not a located diagnostic: ${formatted}`);
-    const numbered = fs.readFileSync(located[1]!, "utf8").split("\n");
-    const line = numbered[Number(located[2]!) - 1];
+    if (located?.[1] === undefined || located[2] === undefined) {
+      throw new Error(`not a located diagnostic: ${formatted}`);
+    }
+    const numbered = fs.readFileSync(located[1], "utf8").split("\n");
+    const line = numbered[Number(located[2]) - 1];
     expect(line).toBeDefined();
-    expect(line!.trim()).toBe(offendingLine);
+    expect(line?.trim()).toBe(offendingLine);
   }
 
   test("a slot diagnostic after an include names the template's real line", () => {

@@ -5,8 +5,8 @@ import path from "node:path";
 import type { Config, Diagnostic, DiscoveredSkill, Root } from "./types.ts";
 import { warning } from "./types.ts";
 import { OUTPUT_FILENAME, STAMP_FILENAME, stateDir } from "./layout.ts";
-import { ensureRealDir, openForWriteNoFollow } from "./fsutil.ts";
-import { normaliseEol, normaliseEolBytes } from "./text.ts";
+import { ensureRealDir, openForWriteNoFollow, readRegularFile } from "./fsutil.ts";
+import { normaliseEol } from "./text.ts";
 import { foreignOwner, standingOf } from "./ownership.ts";
 
 /**
@@ -14,7 +14,7 @@ import { foreignOwner, standingOf } from "./ownership.ts";
  * cannot interpret, so it is treated as absent rather than parsed leniently — one forced rebuild,
  * deliberately, in place of a silent misreading of what the last build left on disk.
  */
-const STAMP_VERSION = 2;
+const STAMP_VERSION = 3;
 
 /**
  * Owner-only, for the reason `build.log` is: the record carries the same `Diagnostic[]` the log
@@ -31,9 +31,7 @@ export function hashContent(content: string): string {
 
 /**
  * The stamp is a cache hint, never an authority: a matching input hash says only that the *inputs*
- * are unchanged, so the outputs are checked by content. Only `SKILL.md` is hashed — a `references/`
- * tree dominates corpus bytes and hashing it would put the gated path's cost back where the stamp
- * exists to avoid, and `SKILL.md` is the file that reaches the model as instructions.
+ * are unchanged, so the outputs are checked by content. Every emitted file is checked, including verbatim supporting files and permission bits.
  *
  * **Outcomes are recorded per target because they differ per target.** A skill written to one and
  * declined in another has no single state, and collapsing the pair to *declined* would strip the
@@ -79,7 +77,11 @@ export function outputsVerified(
         if (actual !== null) matched = false;
         continue;
       }
-      if (actual !== null && hashContent(actual) === outcome.hash) {
+      if (
+        actual !== null &&
+        hashContent(actual) === outcome.hash &&
+        manifestsMatch(destination, outcome.files)
+      ) {
         verified++;
         continue;
       }
@@ -128,7 +130,7 @@ function declineHolds(destination: string): boolean {
 
 function readOutput(candidate: string): string | null {
   try {
-    return fs.readFileSync(candidate, "utf8");
+    return readRegularFile(candidate).bytes.toString("utf8");
   } catch {
     return null;
   }
@@ -213,12 +215,14 @@ function listEntries(root: string): ListedEntry[] {
 function updateWithFile(hash: crypto.Hash, file: string): void {
   let raw: Buffer;
   try {
-    raw = fs.readFileSync(file);
+    const read = readRegularFile(file);
+    raw = read.bytes;
+    hash.update(`mode\0${read.mode}\0`);
   } catch {
     hash.update("\0unreadable");
     return;
   }
-  hash.update(normaliseEolBytes(raw));
+  hash.update(raw);
 }
 
 /**
@@ -241,7 +245,9 @@ export interface StampRecord {
   diagnostics: Diagnostic[];
 }
 
-export type TargetOutcome = { outcome: "written"; hash: string } | { outcome: "declined" };
+export type TargetOutcome =
+  | { outcome: "written"; hash: string; files: OutputManifest }
+  | { outcome: "declined" };
 
 /** One skill's outcome at each target, keyed by the target's resolved path. */
 export type SkillOutcomes = Record<string, TargetOutcome>;
@@ -253,7 +259,7 @@ function stampPath(config: Config): string {
 export function readStamp(config: Config): StampRecord | null {
   let text: string;
   try {
-    text = fs.readFileSync(stampPath(config), "utf8").trim();
+    text = readRegularFile(stampPath(config)).bytes.toString("utf8").trim();
   } catch {
     return null;
   }
@@ -309,7 +315,29 @@ function readOutcome(value: unknown): TargetOutcome | null {
   if (value["outcome"] === "declined") return { outcome: "declined" };
   const hash = value["hash"];
   if (value["outcome"] === "written" && typeof hash === "string" && hash !== "") {
-    return { outcome: "written", hash };
+    const files = value["files"];
+    if (!isRecord(files) || !Object.hasOwn(files, OUTPUT_FILENAME)) return null;
+    const manifest: OutputManifest = {};
+    for (const [rel, entry] of Object.entries(files)) {
+      if (
+        !isRecord(entry) ||
+        typeof entry["hash"] !== "string" ||
+        typeof entry["mode"] !== "number" ||
+        !Number.isInteger(entry["mode"]) ||
+        entry["mode"] < 0 ||
+        entry["mode"] > 0o777
+      )
+        return null;
+      if (
+        rel === "" ||
+        rel.split("/").some((part) => part === "" || part === "." || part === "..") ||
+        rel.includes("\\") ||
+        path.isAbsolute(rel)
+      )
+        return null;
+      manifest[rel] = { hash: entry["hash"], mode: entry["mode"] };
+    }
+    return { outcome: "written", hash, files: manifest };
   }
   return null;
 }
@@ -364,4 +392,43 @@ export function writeStamp(config: Config, record: StampRecord): Diagnostic[] {
     // a stamp that cannot be written only costs a rebuild next session
   }
   return [];
+}
+
+export type OutputManifest = Record<string, { hash: string; mode: number }>;
+
+/** Enumerate the actual emitted tree; links and special files never count as valid output. */
+export function snapshotOutput(directory: string): OutputManifest {
+  const manifest: OutputManifest = {};
+  const walk = (dir: string, prefix: string) => {
+    if (!fs.lstatSync(dir).isDirectory()) throw new Error(`not a real directory: ${dir}`);
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix + entry.name;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(file, `${rel}/`);
+      else {
+        const read = readRegularFile(file);
+        manifest[rel] = {
+          hash: crypto.createHash("sha256").update(read.bytes).digest("hex"),
+          mode: read.mode,
+        };
+      }
+    }
+  };
+  walk(directory, "");
+  return manifest;
+}
+
+function manifestsMatch(directory: string, expected: OutputManifest): boolean {
+  try {
+    const actual = snapshotOutput(directory);
+    const entries = Object.entries(expected);
+    return (
+      entries.length === Object.keys(actual).length &&
+      entries.every(
+        ([rel, entry]) => actual[rel]?.hash === entry.hash && actual[rel]?.mode === entry.mode,
+      )
+    );
+  } catch {
+    return false;
+  }
 }

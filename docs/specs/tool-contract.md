@@ -71,7 +71,14 @@ shipped default rather than a mistake. An entry that spells `${home}` is asserte
 out lexically, and of the **real** path, which catches an entry that leads out through a symlink.
 Either escape drops that entry with an error — that entry only, not the run — in any of the three
 lists: a source read from outside `${home}`, an override read from outside it, and a target written
-outside it are one mistake wearing three hats. This is the one check that reaches a named root's
+outside it are one mistake wearing three hats. Where the real path cannot be established at all the
+answer is *unknown* rather than *outside*, and the two are not collapsed. A **dangling** link is
+refused with the escapes, because a destination that is not there yet may come to be anywhere. A
+component this build may not **traverse** is one it can also neither read nor write through, so the
+entry is kept with a warning and every consumer that touches it resolves it again and fails closed
+naming itself — refusing it here would trade that diagnostic for a config error, and would fail
+`build --check` over a `chmod` standing above a root rather than over anything stale. This is the
+one check that reaches a named root's
 own last component, which nothing `lstat`s (see [invariant 8](#constraints-and-invariants)). A
 leading `~` or `~/` expands to the home directory in any entry; a `~/…` entry names no root to be
 contained by and so carries no containment check.
@@ -203,7 +210,9 @@ collision and is simply consumed — **in any case** as well, and for the same r
 `skill.md.tmpl` is the file that was found and compiled, an exact-case reading would not
 recognise it as the template and would copy it verbatim, putting the raw slot and include
 directives into the emitted skill directory beside the `SKILL.md` compiled from them. A symlink
-inside a skill directory is not copied, and warns; a skill directory that is *itself* a symlink
+inside a skill directory is not copied, and warns. A symlinked `SKILL.md.tmpl` is rejected
+before its contents are read and blocks pruning for that run. Failure to enumerate any supporting
+directory rejects the skill and retains its previous complete output. A skill directory that is *itself* a symlink
 is not followed, since following it would read a template from outside every configured source
 root. Where that directory holds a template or otherwise looks like a skill, the refusal is said
 out loud — it warns, and blocks pruning for that run, because what was refused may be a skill
@@ -316,8 +325,7 @@ field.
 **The opening `---` must be the file's first line.** The rule is on the shape, not on its
 causes: a `---` fence reached before the file's first non-blank content, in a file that did not
 already open with one, is rejected — whatever put it off line 1. A UTF-8 BOM is the exception,
-and is stripped rather than rejected, before anything else and in the stamp's byte-level twin as
-well: a Windows editor or a PowerShell redirect writes one invisibly, and the file the author
+and is stripped rather than rejected before compilation: a Windows editor or a PowerShell redirect writes one invisibly, and the file the author
 sees should be the file the compiler reads. The reason to refuse the rest is that byte-identity
 is enforced by comparing the template's frontmatter *region* against the output's: a file whose fence is not on line 1 has no
 such region, every check guarding it passes vacuously, and a slot between the two fences becomes
@@ -462,7 +470,7 @@ the same reason — it compiled nothing, so the last real build is still the tru
 syntax in the output; a malformed `slot` directive — an invalid slot name, or an attribute other
 than `mode=replace|append`; a `<!-- /slot -->` closing no open slot; frontmatter opened with
 `---` and never closed, or a `---` fence that opens the file only after one or more blank lines;
-a template that cannot be read, or an `include:` naming a fragment that
+a template that cannot be read safely, an unreadable supporting directory, or an `include:` naming a fragment that
 cannot be read; a slot declared in the frontmatter region; emitted
 frontmatter not byte-identical to the template's; an `include:` resolving outside its own source
 root, or an override resolving outside its own override root — by `..`, by a symlink hop, by a
@@ -778,15 +786,18 @@ string it writes, which must stay byte-stable whatever is on disk today.
 
 1. **A content-hash stamp is compared first.** The hashed inputs are the tool version, the
    declared `id`, every configured root's spec *and* the path it resolved to, the config file's
-   own bytes, and the full contents of every source and override tree — with a symlink's
+   text with normalized line endings, and the raw bytes and file permission bits of every source
+   and override tree — with a symlink's
    destination recorded rather than followed, since retargeting one changes what the build
    refuses to do. A matching hash is **necessary but not sufficient**: the stamp also records
-   **one outcome per skill per target** — a content hash where a `SKILL.md` was written there,
-   and a decline where the target held something that was not this tool's to replace. Every
-   recorded hash is re-read and re-hashed before the gate closes, so editing or deleting a
-   compiled skill by hand rebuilds it with the stamp intact.
-   Only `SKILL.md` is hashed — a `references/` tree dominates corpus bytes, and hashing it would
-   put the gated path's cost back where the stamp exists to avoid it. A skill that failed carries
+   **one outcome per skill per target** — the compiled `SKILL.md` hash and a complete file list
+   where the skill was written, or a decline where the target held something that was not this
+   tool's to replace. The file list includes supporting files and the ownership marker, with
+   byte hashes and permission bits. Missing, changed, or unexpected files make the output stale.
+   Verification refuses symlinks and special files; regular files are opened without following
+   their final component and without blocking on a named pipe. This checks all emitted files
+   on every run, trading more read I/O for complete file verification. Older stamp formats force
+   one rebuild. A skill that failed carries
    its *previous* record forward rather than dropping to none, so it stays integrity-checked while
    it is broken. **The outcome is recorded per target because it differs per target.** A skill
    written to one target and declined in another has no single state, and collapsing the pair to

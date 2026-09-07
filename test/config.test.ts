@@ -18,6 +18,7 @@ import {
   override,
   read,
   remove,
+  strayAncestors,
   symlink,
   withFsFailures,
   workspace,
@@ -2028,5 +2029,40 @@ describe("unknown config keys", () => {
     expect(hasWarning(run)).toBe(true);
     expect(run.stdout).toContain('unknown config key "sourcs" ignored');
     expect(compiled(ws, "x")).toContain("Body.");
+  });
+});
+
+/**
+ * The fixture's own precondition, not the tool's. `findConfigFile` and `findRepoRoot` climb until
+ * they meet a `.git`, and a workspace built without one lets them climb past the temp directory —
+ * so a config or a `.git` above `os.tmpdir()` quietly decides what those tests observe. The guard
+ * that detects it runs once per suite and cannot be exercised there, so its walk is pinned here.
+ */
+describe("the fixture's guard against a shadowed temp directory", () => {
+  afterEach(cleanup);
+
+  test("finds a config sitting above the directory a workspace would be created in", () => {
+    const ws = workspace();
+    const deep = mkdir(ws.root, "a/b/c");
+    write(ws.root, { "a/composable-skills.jsonc": '{ "id": "stray" }\n' });
+
+    expect(strayAncestors(deep)).toContain(path.join(ws.root, "a", "composable-skills.jsonc"));
+  });
+
+  test("finds a .git above it too, which is what decides a repo root", () => {
+    const ws = workspace();
+    const deep = mkdir(ws.root, "a/b/c");
+    write(ws.root, { "a/.git/HEAD": "ref: refs/heads/main\n" });
+
+    expect(strayAncestors(deep)).toContain(path.join(ws.root, "a", ".git"));
+  });
+
+  test("is silent about a clean ancestry, so it cannot cry wolf on every run", () => {
+    const ws = workspace();
+    const deep = mkdir(ws.root, "a/b/c");
+
+    // Anything the machine happens to have above the temp directory is not this assertion's
+    // business — what must hold is that the walk invents nothing inside the tree we control.
+    expect(strayAncestors(deep).filter((entry) => entry.startsWith(ws.root))).toEqual([]);
   });
 });

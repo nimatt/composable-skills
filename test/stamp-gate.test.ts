@@ -40,7 +40,7 @@ function sha256(content: string): string {
  * these tests is what lands on disk, and a shape imported from the writer would agree with itself.
  * The format version is spelled out for the same reason.
  */
-const STAMP_FORMAT = 2;
+const STAMP_FORMAT = 3;
 
 type TargetOutcome = { outcome: "written"; hash: string } | { outcome: "declined" };
 
@@ -89,7 +89,7 @@ describe("emitSkill's three outcomes", () => {
     const stamp = storedStamp(ws.repo);
     expect(stamp.version).toBe(STAMP_FORMAT);
     expect(stamp.failed).toEqual([]);
-    expect(outcomeAt(ws.repo, "w", targetOf(ws))).toEqual({
+    expect(outcomeAt(ws.repo, "w", targetOf(ws))).toMatchObject({
       outcome: "written",
       hash: sha256(read(ws.repo, ".claude/skills/w/SKILL.md")),
     });
@@ -118,7 +118,7 @@ describe("emitSkill's three outcomes", () => {
     // A decline is not a failure: the skill compiled, it just did not land here.
     expect(storedStamp(ws.repo).failed).toEqual([]);
     expect(outcomeAt(ws.repo, "hand", target)).toEqual({ outcome: "declined" });
-    expect(outcomeAt(ws.repo, "ok", target)).toEqual({
+    expect(outcomeAt(ws.repo, "ok", target)).toMatchObject({
       outcome: "written",
       hash: sha256(read(ws.repo, ".claude/skills/ok/SKILL.md")),
     });
@@ -130,7 +130,7 @@ describe("emitSkill's three outcomes", () => {
     });
     build(ws);
     const firstOutcome = outcomeAt(ws.repo, "f", targetOf(ws));
-    expect(firstOutcome).toEqual({
+    expect(firstOutcome).toMatchObject({
       outcome: "written",
       hash: sha256("---\nname: f\n---\n\nFirst.\n"),
     });
@@ -154,7 +154,7 @@ describe("emitSkill's three outcomes", () => {
     // The swap never started, so the previous output is still exactly what it was — and an I/O
     // error says nothing about the file standing there, so its previous outcome stays the truth.
     expect(read(ws.repo, ".claude/skills/f/SKILL.md")).toBe("---\nname: f\n---\n\nFirst.\n");
-    expect(outcomeAt(ws.repo, "f", targetOf(ws))).toEqual(firstOutcome!);
+    expect(outcomeAt(ws.repo, "f", targetOf(ws))).toEqual(firstOutcome);
   });
 
   /**
@@ -252,7 +252,7 @@ describe("emitSkill's three outcomes", () => {
     const after = build(ws);
     expect(compiledThisRun(after.stdout)).toBe(true);
     expect(read(ws.repo, ".claude/skills/hand/SKILL.md")).toBe(COMPILED);
-    expect(outcomeAt(ws.repo, "hand", targetOf(ws))).toEqual({
+    expect(outcomeAt(ws.repo, "hand", targetOf(ws))).toMatchObject({
       outcome: "written",
       hash: sha256(COMPILED),
     });
@@ -335,7 +335,7 @@ describe("emitSkill's three outcomes", () => {
     expect(first.code).toBe(0);
     expect(read(ws.repo, ".claude/skills/m/SKILL.md")).toBe(COMPILED);
     expect(read(ws.repo, ".agents/skills/m/SKILL.md")).toBe("Written by a human.\n");
-    expect(outcomeAt(ws.repo, "m", targetOf(ws))).toEqual({
+    expect(outcomeAt(ws.repo, "m", targetOf(ws))).toMatchObject({
       outcome: "written",
       hash: sha256(COMPILED),
     });
@@ -538,10 +538,10 @@ describe("stamp determinism under an unreadable input", () => {
   test("an unreadable source file leaves the stamp stable", () => {
     const ws = workspace({ repoFiles: REPO_FILES });
     const unreadable = path.join(ws.repo, "templates", "notes.md");
-    const failure: FsFailure = { calls: ["readFileSync"], when: unreadable };
+    const failure: FsFailure = { calls: ["openSync"], when: unreadable };
 
     const first = withFsFailures(failure, () => build(ws));
-    expect(first.fired).toEqual([`readFileSync ${unreadable}`]);
+    expect(first.fired).toEqual([`openSync ${unreadable}`]);
     const firstStamp = storedStamp(ws.repo).stamp;
 
     const gated = withFsFailures(failure, () => build(ws));

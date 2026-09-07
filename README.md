@@ -406,12 +406,16 @@ run by hand.
 What `build` already does is everything that makes it safe to run that way. A content hash — of
 the tool version, the declared `id`, every configured root and the path it resolved to, the
 config file, and every source and override tree — is checked first. A match is necessary but not
-sufficient: the stamp also records a hash of every compiled `SKILL.md`, and each is re-read
-before the gate closes, so editing or deleting one by hand rebuilds it even with the stamp
-intact. When both hold the build recompiles nothing — though not in silence: the stamp also
+sufficient: the stamp records every emitted file, including `SKILL.md`, supporting scripts and
+references, and the ownership marker. File contents and permission bits are checked before
+the gate closes; missing, changed, or unexpected files trigger a rebuild. Source and override
+files are hashed as raw bytes, so changes to verbatim assets cannot be hidden by line-ending
+normalization. Older stamps trigger one rebuild to record the complete file list. When both hold the build recompiles nothing — though not in silence: the stamp also
 records which skills failed last time and what they said, and a gated run replays those
 diagnostics under a `[last build]` prefix, so a broken template is re-reported every session
-until it is fixed rather than forcing a full recompile forever. Each
+until it is fixed rather than forcing a full recompile forever. An unreadable supporting
+directory rejects that skill and retains its previous files. Both the stamp and build log use
+owner-only permissions because diagnostics may quote private content. Each
 skill is staged in a temp directory inside the target and swapped into place on success, so a
 failed build never destroys the last good output. And `build` exits 0 unconditionally, so a
 fail-soft session hook can never break a session — `build --check` is the variant that writes
