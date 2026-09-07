@@ -12,6 +12,7 @@ import {
   hasError,
   hasWarning,
   mkdir,
+  modeOf,
   occurrences,
   read,
   readBytes,
@@ -144,6 +145,107 @@ describe("diagnostics", () => {
     expect(separate.text).toContain("merge-conflict marker");
     expect(separate.code).toBe(shared.code);
     expect(separate.text).toBe(shared.text);
+  });
+
+  const LOG = ".composable-skills/build.log";
+
+  /**
+   * **Finding 24.** `src/report.ts` justifies the log's mode on security grounds: a diagnostic
+   * quotes the line it rejected, so the file can hold whatever a template, fragment or override
+   * held — a merge-conflict marker wrapped around a secret is the case the workspace above builds.
+   * Nothing asserted the mode in either direction, so widening `LOG_MODE` to 0644 shipped green.
+   *
+   * Neither of these carries the suite's `skipIf(asRoot)`: root bypasses permission *enforcement*,
+   * which is what those other tests turn on, but the mode recorded in the inode is the same number
+   * whoever set it, and `open` with a mode and `fchmod` both apply as root.
+   */
+  test("a freshly created build log is owner-only", () => {
+    const ws = rejecting();
+
+    build(ws);
+
+    expect(modeOf(ws.repo, LOG)).toBe(0o600);
+  });
+
+  /**
+   * The case the deliberate re-`chmod` on every write exists for, and the one a mode passed to
+   * `open` cannot cover: a mode only takes effect where the file is *created*, so a log left
+   * world-readable by an older version, an umask or a hand-edit would stay that way for every
+   * build after it.
+   */
+  test("a log that already existed at a wider mode is narrowed, not left as it was", () => {
+    const ws = rejecting();
+    write(ws.repo, { [LOG]: "left behind by something else\n" });
+    chmod(ws.repo, LOG, 0o644);
+
+    build(ws);
+
+    expect(modeOf(ws.repo, LOG)).toBe(0o600);
+    expect(read(ws.repo, LOG)).toContain("merge-conflict marker");
+  });
+
+  /**
+   * **Finding 23.** The spec: "A gated run is not a silent one — it replays the last real build's
+   * diagnostics, and it still writes the log." A healthy repo is the case where there is nothing
+   * to replay, and the log write used to be skipped whenever the report came out empty — so on
+   * exactly the repos that are working, `build.log` never came back once it was deleted, and the
+   * third channel the spec keeps "because the first two are frequently unread" was the one that
+   * went missing. The run still happened, so the file says so; the streams stay silent, which is
+   * what being gated means.
+   */
+  test("a gated run over a healthy repo writes the log again after it is deleted", () => {
+    const ws = workspace({
+      repoFiles: { "templates/h/SKILL.md.tmpl": "---\nname: h\n---\n\nBody.\n" },
+    });
+    expect(build(ws).code).toBe(0);
+    remove(ws.repo, LOG);
+
+    const gated = build(ws);
+
+    expect(gated.code).toBe(0);
+    expect(gated.stdout).toBe("");
+    expect(exists(ws.repo, LOG)).toBe(true);
+    expect(read(ws.repo, LOG)).toContain("composable-skills: nothing to report");
+    // The record of a run is dated, or it records nothing about which run it was.
+    expect(read(ws.repo, LOG).split("\n")[0]).toMatch(/^\d{4}-\d\d-\d\dT/);
+    expect(modeOf(ws.repo, LOG)).toBe(0o600);
+  });
+
+  const STAMP = ".composable-skills/stamp";
+
+  /**
+   * **Finding 26.** The stamp stores the same `Diagnostic[]` the log does — the quoted conflict
+   * line above, and whatever a template, fragment or override wrapped it around — and replays it
+   * on every gated run afterwards. It was written at the umask default while the log beside it was
+   * `0600`, so the identical text was owner-only in one file and world-readable in the other.
+   *
+   * Like the log's two tests, neither of these carries `skipIf(asRoot)`: what is asserted is the
+   * mode stored in the inode, which `open` and `fchmod` record the same whoever runs them.
+   */
+  test("a freshly written stamp is owner-only, like the log that quotes the same text", () => {
+    const ws = rejecting();
+
+    build(ws);
+
+    // the stamp really is holding the borrowed text, which is what the mode is for
+    expect(read(ws.repo, STAMP)).toContain("<<<<<<< HEAD");
+    expect(modeOf(ws.repo, STAMP)).toBe(0o600);
+  });
+
+  /**
+   * The same case the log's re-`chmod` exists for: a mode only takes effect where the file is
+   * created, so a stamp left wider by an older version, an umask or a hand-edit would keep that
+   * mode for every build after it.
+   */
+  test("a stamp that already existed at a wider mode is narrowed, not left as it was", () => {
+    const ws = rejecting();
+    write(ws.repo, { [STAMP]: "left behind by an older version\n" });
+    chmod(ws.repo, STAMP, 0o644);
+
+    build(ws);
+
+    expect(modeOf(ws.repo, STAMP)).toBe(0o600);
+    expect(read(ws.repo, STAMP)).toContain("<<<<<<< HEAD");
   });
 });
 
@@ -787,6 +889,10 @@ describe("write containment", () => {
       writeFileSync: fs.writeFileSync,
       renameSync: fs.renameSync,
       copyFileSync: fs.copyFileSync,
+      // The log and the stamp are written to a descriptor, so `writeFileSync` is given a number
+      // for those two and records nothing. Without the `open` they were the only writes a build
+      // makes that this test could not see, which is exactly where a path escaped the repo once.
+      openSync: fs.openSync,
     };
     const note = (...candidates: unknown[]) => {
       for (const candidate of candidates)
@@ -811,6 +917,10 @@ describe("write containment", () => {
         note(to);
         return original.copyFileSync(from, to, mode);
       }) as typeof fs.copyFileSync;
+      fs.openSync = ((p: never, flags: never, mode: never) => {
+        note(p);
+        return original.openSync(p, flags, mode);
+      }) as typeof fs.openSync;
       run = build(ws);
     } finally {
       Object.assign(fs, original);
@@ -836,6 +946,102 @@ describe("write containment", () => {
     // and the compiled file really was written into that staging directory, not into the target
     expect(touched).toContain(path.join(staged[0]!, "SKILL.md"));
     expect(touched).not.toContain(path.join(targetDir, "w", "SKILL.md"));
+    // The two state-dir writes go to a descriptor, so they are only visible here through the
+    // `open` that produced it. They are the paths a planted symlink once redirected out of the
+    // repo entirely, which is precisely why this test has to keep seeing them.
+    expect(touched).toContain(path.join(ws.repo, ".composable-skills", "build.log"));
+    expect(touched).toContain(path.join(ws.repo, ".composable-skills", "stamp"));
+  });
+
+  /**
+   * Invariants 7 and 8 where they were once both broken at once. `.composable-skills/` holds two
+   * paths this tool derives and writes by name, and `writeFileSync` follows a symlink standing at
+   * its destination: a link committed at either one made every build in every clone truncate,
+   * overwrite and chmod whatever it pointed at — outside the repo, with no diagnostic and exit 0.
+   * The three tests below plant the three shapes of that link and pin what the tool does instead.
+   *
+   * `PRECIOUS` is given an explicit mode because the log write also `chmod`s to 0600, so the
+   * damage was visible in the mode as well as the content.
+   */
+  const PRECIOUS = "Someone else's file. Not this tool's to touch.\n";
+
+  function withOutsideFile(): Workspace {
+    const ws = workspace({
+      repoFiles: { "templates/w/SKILL.md.tmpl": "---\nname: w\n---\n\nCompiled.\n" },
+    });
+    write(ws.root, { "outside/precious.txt": PRECIOUS });
+    chmod(ws.root, "outside/precious.txt", 0o644);
+    return ws;
+  }
+
+  // Deliberately silent: `emitReport` is the reporter, and a diagnostic raised while it is writing
+  // its own log has nowhere left to go. The removal is still what happens.
+  test("a symlink standing at the build log is removed rather than written through", () => {
+    const ws = withOutsideFile();
+    symlink(path.join(ws.root, "outside", "precious.txt"), ws.repo, ".composable-skills/build.log");
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasWarning(run)).toBe(false);
+    expect(read(ws.root, "outside/precious.txt")).toBe(PRECIOUS);
+    expect(modeOf(ws.root, "outside/precious.txt")).toBe(0o644);
+
+    const log = path.join(ws.repo, ".composable-skills", "build.log");
+    expect(fs.lstatSync(log).isSymbolicLink()).toBe(false);
+    expect(read(ws.repo, ".composable-skills/build.log")).toContain("composable-skills:");
+    expect(compiled(ws, "w")).toBe("---\nname: w\n---\n\nCompiled.\n");
+  });
+
+  // Not silent: invariant 8 asks that no symlink is followed, and that none is followed silently.
+  // The stamp is written before the report is rendered, so the run can still name the link.
+  test("a symlink standing at the stamp is removed, named, and not written through", () => {
+    const ws = withOutsideFile();
+    symlink(path.join(ws.root, "outside", "precious.txt"), ws.repo, ".composable-skills/stamp");
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasWarning(run)).toBe(true);
+    expect(run.stdout).toContain("the stamp path was a symlink");
+    expect(run.stdout).toContain(path.join(ws.repo, ".composable-skills", "stamp"));
+    expect(read(ws.root, "outside/precious.txt")).toBe(PRECIOUS);
+    expect(modeOf(ws.root, "outside/precious.txt")).toBe(0o644);
+
+    const stamp = path.join(ws.repo, ".composable-skills", "stamp");
+    expect(fs.lstatSync(stamp).isSymbolicLink()).toBe(false);
+    expect(read(ws.repo, ".composable-skills/stamp")).toContain('"version"');
+    expect(compiled(ws, "w")).toBe("---\nname: w\n---\n\nCompiled.\n");
+  });
+
+  /**
+   * The widest of the three: a link at the state directory itself redirects the log, the stamp and
+   * the lock in one move. There is nowhere inside the repo left to put them, so the tool writes
+   * none of them and builds on — the same fail-soft the state directory gets when it is a regular
+   * file, and the lock's own "building without a lock" is where the link gets named.
+   */
+  test("a symlinked state directory is refused, and none of its files land outside the repo", () => {
+    const ws = workspace({
+      repoFiles: { "templates/w/SKILL.md.tmpl": "---\nname: w\n---\n\nCompiled.\n" },
+    });
+    write(ws.root, { "outside/state/keep.txt": PRECIOUS });
+    const outside = path.join(ws.root, "outside", "state");
+    symlink(outside, ws.repo, ".composable-skills");
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(hasWarning(run)).toBe(true);
+    expect(run.stdout).toContain("building without a lock");
+    expect(run.stdout).toContain("refusing to write through the symlink");
+
+    expect(fs.readdirSync(outside)).toEqual(["keep.txt"]);
+    expect(read(ws.root, "outside/state/keep.txt")).toBe(PRECIOUS);
+    // the link itself is left as it was found, not replaced by a directory of the tool's own
+    expect(fs.lstatSync(path.join(ws.repo, ".composable-skills")).isSymbolicLink()).toBe(true);
+    // and the build still did its work, inside the repo
+    expect(compiled(ws, "w")).toBe("---\nname: w\n---\n\nCompiled.\n");
   });
 });
 
@@ -1239,6 +1445,164 @@ describe("prune and ownership", () => {
     expect(compiled(ws, "keep")).toBe("---\nname: keep\n---\n\nKeep.\n");
   });
 
+  /**
+   * The same collapse as the symlinked directory above, one level down, and the case the probe in
+   * `discover.ts` exists to prevent: a skill whose template cannot be `stat`'d drops out of
+   * discovery, and an undiscovered skill is indistinguishable from a deleted one. So the arm
+   * warns, the run's pruning is suppressed, and the output compiled while the template was
+   * readable is still standing afterwards.
+   */
+  test("a skill whose template cannot be read warns and keeps its compiled output", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/flaky/SKILL.md.tmpl": "---\nname: flaky\n---\n\nCompiled while readable.\n",
+        "templates/keep/SKILL.md.tmpl": "---\nname: keep\n---\n\nKeep.\n",
+      },
+    });
+    build(ws);
+    expect(compiled(ws, "flaky")).toContain("Compiled while readable.");
+
+    // Edited so the stamp differs and the gate cannot skip the run; the injected failure is what
+    // stops the edit from ever being read.
+    write(ws.repo, { "templates/flaky/SKILL.md.tmpl": "---\nname: flaky\n---\n\nNever read.\n" });
+    const template = path.join(ws.repo, "templates", "flaky", "SKILL.md.tmpl");
+
+    // Injected rather than `chmod`'d: mode 000 stops nobody running as uid 0, which most CI
+    // images do. `fired` is what says the failure the test asked for is the one that happened.
+    const { result: run, fired } = withFsFailures({ calls: ["statSync"], when: template }, () =>
+      build(ws),
+    );
+
+    expect(fired).toContain(`statSync ${template}`);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain(`cannot read template ${template}: permission or I/O error`);
+    expect(run.stdout).toContain("nothing was pruned this run");
+    expect(compiled(ws, "flaky")).toBe("---\nname: flaky\n---\n\nCompiled while readable.\n");
+    expect(compiled(ws, "keep")).toBe("---\nname: keep\n---\n\nKeep.\n");
+  });
+
+  /**
+   * The third arm of the same rule: there is no template, and the probe that decides whether the
+   * directory was ever skill-shaped cannot read it either. "I could not look" and "there is
+   * nothing here" are the same observation, so a skill deleted in the same run keeps its compiled
+   * output rather than being pruned on the strength of a corpus that was never fully enumerated.
+   */
+  test("a skill directory that cannot be read warns and suppresses the run's pruning", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/keep/SKILL.md.tmpl": "---\nname: keep\n---\n\nKeep.\n",
+        "templates/gone/SKILL.md.tmpl": "---\nname: gone\n---\n\nGone next build.\n",
+      },
+    });
+    build(ws);
+    expect(exists(ws.repo, ".claude/skills/gone/SKILL.md")).toBe(true);
+
+    remove(ws.repo, "templates/gone");
+    write(ws.repo, { "templates/opaque/notes.md": "Not a template.\n" });
+    const opaque = path.join(ws.repo, "templates", "opaque");
+
+    const { result: run, fired } = withFsFailures({ calls: ["readdirSync"], when: opaque }, () =>
+      build(ws),
+    );
+
+    expect(fired).toContain(`readdirSync ${opaque}`);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain(`cannot read skill directory ${opaque}: permission or I/O error`);
+    expect(run.stdout).toContain("nothing was pruned this run");
+    expect(exists(ws.repo, ".claude/skills/gone/SKILL.md")).toBe(true);
+    expect(compiled(ws, "keep")).toBe("---\nname: keep\n---\n\nKeep.\n");
+  });
+
+  /**
+   * The one arm of the three that deliberately does *not* suppress pruning: the directory was read
+   * end to end and simply holds no template, so the corpus is known and a skill deleted in the
+   * same run really is gone. It is still worth a warning, because a directory holding a `SKILL.md`
+   * and no `SKILL.md.tmpl` is almost always a template nobody renamed.
+   */
+  test("a skill directory with no SKILL.md.tmpl warns and still lets the run prune", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/keep/SKILL.md.tmpl": "---\nname: keep\n---\n\nKeep.\n",
+        "templates/gone/SKILL.md.tmpl": "---\nname: gone\n---\n\nGone next build.\n",
+        "templates/notes/SKILL.md": "---\nname: notes\n---\n\nNever renamed.\n",
+      },
+    });
+    const first = build(ws);
+
+    expect(first.stdout).toContain("no SKILL.md.tmpl — skipped");
+    expect(exists(ws.repo, ".claude/skills/notes")).toBe(false);
+
+    remove(ws.repo, "templates/gone");
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("no SKILL.md.tmpl — skipped");
+    expect(run.stdout).not.toContain("nothing was pruned this run");
+    expect(run.stdout).toContain("1 pruned");
+    expect(exists(ws.repo, ".claude/skills/gone")).toBe(false);
+    expect(compiled(ws, "keep")).toBe("---\nname: keep\n---\n\nKeep.\n");
+  });
+
+  /**
+   * The marker records the skill directory's own name, so every name the filesystem allows has to
+   * survive the round trip. A zero-width joiner is the ordinary case — every emoji sequence
+   * carries one — and while the reader put that field through its control-character filter the
+   * tool disowned its own output: the directory could be neither rewritten nor pruned, and the
+   * build blamed the developer for a directory it had created itself.
+   */
+  test("a skill directory named with a zero-width joiner stays this build's to rewrite and prune", () => {
+    const skill = "helper‍bot";
+    const ws = workspace({
+      repoFiles: { [`templates/${skill}/SKILL.md.tmpl`]: "---\nname: helper\n---\n\nOne.\n" },
+    });
+    build(ws);
+    expect(compiled(ws, skill)).toContain("One.");
+
+    write(ws.repo, { [`templates/${skill}/SKILL.md.tmpl`]: "---\nname: helper\n---\n\nTwo.\n" });
+    const rewritten = build(ws);
+
+    expect(rewritten.stdout).not.toContain("was not written by this tool");
+    expect(compiled(ws, skill)).toContain("Two.");
+
+    remove(ws.repo, `templates/${skill}`);
+    const pruning = build(ws);
+
+    expect(pruning.stdout).toContain("1 pruned");
+    expect(exists(ws.repo, `.claude/skills/${skill}`)).toBe(false);
+  });
+
+  /**
+   * An empty entry names nothing that could be unusable, so it warns and nothing more — it is not
+   * a source root that failed to resolve. Counting it as one (which deriving the count from
+   * `roots.length` did) turned a single `""` in `sources` into pruning switched off for the life
+   * of that config, reported as a root the build could not read.
+   */
+  test("an empty sources entry warns and still lets the run prune", () => {
+    const ws = workspace({
+      config: {
+        id: "acme",
+        sources: ["./templates", ""],
+        overrides: [],
+        targets: ["./.claude/skills"],
+      },
+      repoFiles: {
+        "templates/keep/SKILL.md.tmpl": "---\nname: keep\n---\n\nKeep.\n",
+        "templates/gone/SKILL.md.tmpl": "---\nname: gone\n---\n\nGone next build.\n",
+      },
+    });
+    build(ws);
+    expect(exists(ws.repo, ".claude/skills/gone/SKILL.md")).toBe(true);
+
+    remove(ws.repo, "templates/gone");
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("empty source entry ignored");
+    expect(run.stdout).not.toContain("nothing was pruned this run");
+    expect(run.stdout).toContain("1 pruned");
+    expect(exists(ws.repo, ".claude/skills/gone")).toBe(false);
+  });
+
   test("no staging or parked directories are left behind", () => {
     const ws = workspace({
       repoFiles: {
@@ -1507,23 +1871,31 @@ describe("a swap that fails midway", () => {
     expect(compiled(ws, "roll")).toBe("---\nname: roll\n---\n\nOne.\n");
     write(ws.repo, { "templates/roll/SKILL.md.tmpl": "---\nname: roll\n---\n\nTwo.\n" });
 
-    // rename #1 parks the good output; rename #2 moves staging into place. Failing #2 is the
-    // only interesting branch: it is the one that must put #1 back.
-    const original = fs.renameSync;
-    let renames = 0;
-    let run: BuildRun;
-    try {
-      fs.renameSync = ((from: never, to: never) => {
-        renames++;
-        if (renames === 2) throw new Error("rename refused on purpose");
-        return original(from, to);
-      }) as typeof fs.renameSync;
-      run = build(ws);
-    } finally {
-      fs.renameSync = original;
-    }
+    /**
+     * The swap parks the good output first and moves staging into place second, and failing the
+     * second is the only interesting branch — it is the one that must put the first one back. It
+     * is selected by the *operation* rather than by a call ordinal. `emitSkill` renames from three
+     * different paths — the staging directory, the destination, and the parked copy — but only the
+     * staging name carries `.composable-skills-tmp-roll-`, and `withFsFailures` tests the predicate
+     * against both arguments of a `renameSync`, so no other rename in the run can match in either
+     * position: the park moves `roll` to a `.composable-skills-old-` name and the rollback moves it
+     * back. The destination already exists from the first build, so the no-destination fast path —
+     * the other rename *from* staging — is never reached. That is what makes this fire on exactly
+     * the one rename the test means, however many others `emitSkill` grows around it, where keying
+     * on "the second `renameSync`" would pin the test to today's syscall order and let a later
+     * reordering retarget it silently while it stayed green.
+     */
+    const stagingOfRoll = (target: string) => target.includes(".composable-skills-tmp-roll-");
 
-    expect(renames).toBeGreaterThanOrEqual(3);
+    const { result: run, fired } = withFsFailures(
+      { calls: ["renameSync"], when: stagingOfRoll, message: "rename refused on purpose" },
+      () => build(ws),
+    );
+
+    // Exactly one rename was refused, and it was the staging → destination move.
+    expect(fired).toHaveLength(1);
+    expect(fired[0]).toStartWith("renameSync ");
+    expect(fired[0]).toContain(".composable-skills-tmp-roll-");
     expect(run.code).toBe(0);
     expect(hasError(run)).toBe(true);
     expect(run.stdout).toContain("rename refused on purpose");

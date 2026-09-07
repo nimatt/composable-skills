@@ -558,6 +558,46 @@ describe("stamp determinism under an unreadable input", () => {
 });
 
 /**
+ * **Finding 25, fixed.** The spec makes a symlink's *destination* a hashed input — "with a
+ * symlink's destination recorded rather than followed, since retargeting one changes what the
+ * build refuses to do", which invariant 8's last table row repeats. Other tests plant a link under
+ * a source root and so exercise the branch, but none pinned the destination into the hash: with
+ * only the branch covered, hashing a bare `"symlink"` and dropping the destination shipped green.
+ * Repoint a link in `templates/` under that mutation and the gate stays closed for good — the
+ * build never re-evaluates whether the link is now skill-shaped, so its warning or refusal quietly
+ * stops matching the disk.
+ *
+ * Both destinations hold identical bytes and the link keeps its name, so the destination string is
+ * the only input that differs between the two runs.
+ */
+describe("a symlink's destination as a stamp input", () => {
+  test("retargeting a link under a source root invalidates the stamp and recompiles", () => {
+    const ws = workspace({
+      repoFiles: { "templates/s/SKILL.md.tmpl": "---\nname: s\n---\n\nBody.\n" },
+    });
+    write(ws.root, {
+      "outside/one.md": "Identical bytes.\n",
+      "outside/two.md": "Identical bytes.\n",
+    });
+    symlink(path.join(ws.root, "outside", "one.md"), ws.repo, "templates/link.md");
+
+    const first = build(ws);
+    const firstStamp = storedStamp(ws.repo).stamp;
+    expect(first.code).toBe(0);
+    // The gate closes over the untouched tree, so any difference below is the retarget's alone.
+    expect(compiledThisRun(build(ws).stdout)).toBe(false);
+
+    remove(ws.repo, "templates/link.md");
+    symlink(path.join(ws.root, "outside", "two.md"), ws.repo, "templates/link.md");
+
+    const second = build(ws);
+
+    expect(storedStamp(ws.repo).stamp).not.toBe(firstStamp);
+    expect(compiledThisRun(second.stdout)).toBe(true);
+  });
+});
+
+/**
  * **Finding 16, fixed.** `runBuild` catches anything a single skill throws and turns it into one
  * diagnostic, so one skill can never take the corpus down. Every fs call on the per-skill path is
  * guarded — `compileSkill`, `expandIncludes`, `resolveContainedFile`, `resolveSlot`,

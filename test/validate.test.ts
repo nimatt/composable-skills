@@ -114,6 +114,196 @@ describe("rejected", () => {
     );
   });
 
+  /**
+   * **Finding 27, the false positive.** Every marker line used to match on its own, and every
+   * match was an `error`, so two legal Markdown constructs failed compilation outright — naming a
+   * problem the author does not have and hinting at nothing. A setext H1 underlined with exactly
+   * seven `=` now compiles and is emitted; it is still mentioned, because the same line is what a
+   * hand-resolved conflict leaves behind, and the warning is worded so its author can tell at once
+   * that nothing is wrong with their document.
+   */
+  test("a setext heading underlined with exactly seven equals signs still compiles", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/setext/SKILL.md.tmpl": [
+          "---",
+          "name: setext",
+          "---",
+          "",
+          "Section",
+          "=======",
+          "",
+          "Prose under the heading.",
+          "",
+        ].join("\n"),
+      },
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(hasWarning(run)).toBe(true);
+    expect(run.stdout).toContain("nothing is wrong and the build was not broken");
+    expect(compiled(ws, "setext")).toContain("Section\n=======");
+  });
+
+  test("a seven-deep blockquote still compiles too", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/quoted/SKILL.md.tmpl": "---\nname: quoted\n---\n\n>>>>>>> deeply quoted\n",
+      },
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(hasWarning(run)).toBe(true);
+    expect(run.stdout).toContain("nothing is wrong and the build was not broken");
+    expect(compiled(ws, "quoted")).toContain(">>>>>>> deeply quoted");
+  });
+
+  /**
+   * **Finding 27, the false negative.** Relaxing the two ambiguous forms to "only once a `<<<<<<<`
+   * has been seen above" dropped the commonest manual-resolution mistake entirely: accepting
+   * theirs by hand deletes from `<<<<<<<` through `=======` and forgets the trailing `>>>>>>>`,
+   * which is the one conflict shape whose opening line does *not* arrive in the same file. That
+   * template compiled clean and shipped the marker into `SKILL.md`. It cannot be an error — the
+   * identical line is a legal blockquote — but the contract promises a marker never reaches the
+   * model unremarked, and a warning keeps that promise while leaving the build standing.
+   */
+  test("a conflict half-resolved by hand, with its opening deleted, is still reported", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/tail/SKILL.md.tmpl": [
+          "---",
+          "name: tail",
+          "---",
+          "",
+          "their version of the paragraph",
+          ">>>>>>> feature/branch",
+          "",
+        ].join("\n"),
+      },
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    const template = path.join(ws.repo, "templates", "tail", "SKILL.md.tmpl");
+    const reported = lines(run).find((line) => line.includes("merge-conflict marker"));
+    expect(reported).toStartWith(
+      `composable-skills: warning [tail ${template}:6] merge-conflict marker ">>>>>>> feature/branch" with no "<<<<<<<" line opening it:`,
+    );
+    // The consequence being accepted, pinned so nobody reads the warning as a rejection: the build
+    // stands and the leftover line is emitted, which is exactly what the warning tells its reader.
+    expect(compiled(ws, "tail")).toContain(">>>>>>> feature/branch");
+  });
+
+  /**
+   * The same remnant in an override file, which is the other input a merge leaves markers in — and
+   * where a silent drop costs more, because an override is read from a directory the author may
+   * never open again. The override still wins its slot: demoting it to the template default over a
+   * line that may well be a heading underline would swap out text nobody asked to swap.
+   */
+  test("the same half-resolved conflict in an override file is reported, not swallowed", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/ovtail/SKILL.md.tmpl": [
+          "---",
+          "name: ovtail",
+          "---",
+          "",
+          "<!-- slot: s -->",
+          "The safe default.",
+          "<!-- /slot -->",
+          "",
+        ].join("\n"),
+        ".claude/skills-local/ovtail/s.md": "their version\n>>>>>>> feature\n",
+      },
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    const override = path.join(ws.repo, ".claude", "skills-local", "ovtail", "s.md");
+    const reported = lines(run).find((line) => line.includes("merge-conflict marker"));
+    expect(reported).toStartWith(
+      `composable-skills: warning [ovtail ${override}:2] merge-conflict marker ">>>>>>> feature" with no "<<<<<<<" line opening it:`,
+    );
+    expect(compiled(ws, "ovtail")).toContain(">>>>>>> feature");
+    expect(compiled(ws, "ovtail")).not.toContain("The safe default.");
+  });
+
+  /**
+   * `|||||||` is diff3's base marker, and unlike the separator and the closing line it spells no
+   * Markdown construct at all — so it never needed the relaxation the other two needed, and gating
+   * it would have bought nothing at the cost of missing this. On its own, with no opening line
+   * anywhere in the file, it still stops the build.
+   */
+  test("the diff3 base marker on its own is still rejected", () => {
+    const { ws, run, written } = rejects({
+      skill: "base",
+      repoFiles: {
+        "templates/base/SKILL.md.tmpl": "---\nname: base\n---\n\n||||||| merged common ancestors\n",
+      },
+    });
+
+    expect(run.code).toBe(0);
+    expect(written).toBe(false);
+    const template = path.join(ws.repo, "templates", "base", "SKILL.md.tmpl");
+    expect(lines(run)).toContain(
+      `composable-skills: error [base ${template}:5] merge-conflict marker "||||||| merged common ancestors"`,
+    );
+  });
+
+  /**
+   * The other half of the rule, so relaxing it cannot go one line too far: once an opening line
+   * has been seen, every following form is a build-breaking error again, at its own line — while a
+   * setext underline standing *above* the conflict, with no opening over it, stays a warning.
+   */
+  test("but a real conflict is still rejected, opening, base, separator and closing alike", () => {
+    const { ws, run, written } = rejects({
+      skill: "real",
+      repoFiles: {
+        "templates/real/SKILL.md.tmpl": [
+          "---",
+          "name: real",
+          "---",
+          "",
+          "Section",
+          "=======",
+          "",
+          "<<<<<<< HEAD",
+          "ours",
+          "||||||| merged common ancestors",
+          "base",
+          "=======",
+          "theirs",
+          ">>>>>>> branch",
+          "",
+        ].join("\n"),
+      },
+    });
+
+    expect(run.code).toBe(0);
+    expect(written).toBe(false);
+    const template = path.join(ws.repo, "templates", "real", "SKILL.md.tmpl");
+    const reported = lines(run).filter((line) => line.includes("merge-conflict marker"));
+    expect(reported.slice(1)).toEqual([
+      `composable-skills: error [real ${template}:8] merge-conflict marker "<<<<<<< HEAD"`,
+      `composable-skills: error [real ${template}:10] merge-conflict marker "||||||| merged common ancestors"`,
+      `composable-skills: error [real ${template}:12] merge-conflict marker "======="`,
+      `composable-skills: error [real ${template}:14] merge-conflict marker ">>>>>>> branch"`,
+    ]);
+    expect(reported[0]).toStartWith(
+      `composable-skills: warning [real ${template}:6] merge-conflict marker "=======" with no`,
+    );
+  });
+
   test("a stray closing directive", () => {
     const { run, written } = rejects({
       skill: "stray",
@@ -244,6 +434,36 @@ describe("names the compiler writes itself", () => {
       expect(written).toBe(false);
     });
   }
+
+  /**
+   * **Finding 15.** `collectExtras` case-folded the owned-name guard above and then excluded the
+   * template itself with an exact-case compare, and the two have to agree. On a case-insensitive
+   * filesystem — APFS by default, and Windows, both supported — a source file named
+   * `skill.md.tmpl` *is* the template `discoverSkills` found and compiled, because it composes the
+   * path and `stat`s it; the exact-case compare did not recognise it, so the raw template, slot
+   * and include directives and all, was copied into the emitted skill directory beside the
+   * `SKILL.md` compiled from it.
+   *
+   * On a case-sensitive filesystem the two names are two files, which is the only way this box can
+   * pose the comparison at all — so what this pins is the fold, not the filesystem: a name that
+   * differs from the template's only in case is the template's name, and is never copied out.
+   */
+  test("a differently-cased template name is excluded from the copied files too", () => {
+    const ws = workspace({
+      repoFiles: {
+        "templates/cased/SKILL.md.tmpl": "---\nname: cased\n---\n\nBody.\n",
+        "templates/cased/skill.md.tmpl": "<!-- slot: raw -->\nNever emitted.\n<!-- /slot -->\n",
+      },
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(compiled(ws, "cased")).toBe("---\nname: cased\n---\n\nBody.\n");
+    expect(exists(ws.repo, ".claude/skills/cased/skill.md.tmpl")).toBe(false);
+    expect(exists(ws.repo, ".claude/skills/cased/SKILL.md.tmpl")).toBe(false);
+  });
 
   test("but a nested one is an ordinary copied file", () => {
     const ws = workspace({
@@ -434,6 +654,28 @@ describe("override containment", () => {
     expect(exists(ws.repo, ".claude/skills/ov/SKILL.md")).toBe(false);
     // and the content behind the link never reached the output
     expect(run.stdout).not.toContain("SMUGGLED CONTENT");
+  });
+
+  /**
+   * **Finding 28, fixed.** `findStrayOverrides` was the one read path over an override root that
+   * enumerated it with a bare `readdir` and no containment check, so for a symlinked root it
+   * advised about files living outside the root — files `resolveSlot` refuses to read. The
+   * developer got two diagnostics about one directory that contradicted each other: *this override
+   * matches no declared slot*, beside *nothing under this root is read at all*. It now enumerates
+   * through the same check `resolveSlot` resolves a slot with, so it says nothing about a tree the
+   * build will not look at. The advice itself is unchanged for an ordinary root — see "an override
+   * file matching no declared slot never breaks a build".
+   */
+  test("no stray-override advice is given about a root the build refuses to read", () => {
+    const ws = workspace({ repoFiles: { "templates/ov/SKILL.md.tmpl": TEMPLATE } });
+    write(ws.home, { "elsewhere/ov/knwon.md": "A typo, behind a link nothing reads.\n" });
+    symlink(`${ws.home}/elsewhere`, ws.home, "global");
+
+    const run = build(ws);
+
+    expect(run.stdout).toContain("is itself a symlink");
+    expect(run.stdout).not.toContain("matches no declared slot");
+    expect(run.stdout).not.toContain("knwon");
   });
 
   // The one documented exemption, pinned so nobody "fixes" it into consistency: a package

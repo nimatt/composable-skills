@@ -5,6 +5,7 @@ import path from "node:path";
 import type { Config, Diagnostic, DiscoveredSkill, Root } from "./types.ts";
 import { warning } from "./types.ts";
 import { OUTPUT_FILENAME, STAMP_FILENAME, stateDir } from "./layout.ts";
+import { ensureRealDir, openForWriteNoFollow } from "./fsutil.ts";
 import { normaliseEol, normaliseEolBytes } from "./text.ts";
 import { foreignOwner, standingOf } from "./ownership.ts";
 
@@ -14,6 +15,15 @@ import { foreignOwner, standingOf } from "./ownership.ts";
  * deliberately, in place of a silent misreading of what the last build left on disk.
  */
 const STAMP_VERSION = 2;
+
+/**
+ * Owner-only, for the reason `build.log` is: the record carries the same `Diagnostic[]` the log
+ * does, so it holds whatever a template, fragment or override held — a merge-conflict marker
+ * wrapped around a secret, say — and replays it on every later run. Re-applied on every write,
+ * because a mode only takes effect where the file is created and a stamp left wider by an older
+ * version would otherwise stay that way for good.
+ */
+const STAMP_MODE = 0o600;
 
 export function hashContent(content: string): string {
   return crypto.createHash("sha256").update(content, "utf8").digest("hex");
@@ -324,12 +334,34 @@ function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === "string";
 }
 
-export function writeStamp(config: Config, record: StampRecord): void {
+/**
+ * Returns what the caller must say about the write rather than saying it here, because the stamp
+ * is written before the report is rendered and the record on disk is already sealed by then.
+ * Invariant 8 asks that no symlink is followed *silently*: a link standing where the stamp goes is
+ * removed rather than written through, and the run names it.
+ */
+export function writeStamp(config: Config, record: StampRecord): Diagnostic[] {
   try {
-    fs.mkdirSync(stateDir(config.repoRoot), { recursive: true });
+    ensureRealDir(stateDir(config.repoRoot));
     const serialised = JSON.stringify({ version: STAMP_VERSION, ...record });
-    fs.writeFileSync(stampPath(config), `${serialised}\n`, "utf8");
+    const stamp = openForWriteNoFollow(stampPath(config), STAMP_MODE);
+    try {
+      // Before the write, like the log's: a stamp left group- or world-readable by an older
+      // version must not be readable for the span in which this run's diagnostics land in it.
+      fs.fchmodSync(stamp.handle, STAMP_MODE);
+      fs.writeFileSync(stamp.handle, `${serialised}\n`, "utf8");
+    } finally {
+      fs.closeSync(stamp.handle);
+    }
+    if (stamp.removedSymlink) {
+      return [
+        warning("the stamp path was a symlink — removed rather than written through", {
+          file: stampPath(config),
+        }),
+      ];
+    }
   } catch {
     // a stamp that cannot be written only costs a rebuild next session
   }
+  return [];
 }

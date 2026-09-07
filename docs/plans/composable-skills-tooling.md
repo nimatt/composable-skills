@@ -1,5 +1,10 @@
 # Plan: build the `composable-skills` CLI
 
+**Status: historical.** This is the plan as it was written, before any of it existed as code. It is
+kept for the intent and the order it argued for, with *as built* notes added inline where what
+shipped departed from it. Phases 0 through 3 have since been built; Phases 4 and 5 have not. For
+what the tool does today, read the tool contract rather than this plan.
+
 ## Objective
 
 Ship the tool described in [`docs/specs/tool-contract.md`](../specs/tool-contract.md): a node
@@ -7,9 +12,9 @@ CLI that compiles skill templates into `SKILL.md`, merging a developer's persona
 build time, so a skill can be extended at points its author declared without either side losing
 the other's work.
 
-The repo is currently a bare `bun init` scaffold — one commit, `index.ts` prints
-`"Hello via Bun!"`, `package.json` is `"private": true` with no `name`, `bin`, `exports`, or
-`files`. Nothing of the design exists as code.
+The starting state, when this was written: a bare `bun init` scaffold — one commit, `index.ts`
+printing `"Hello via Bun!"`, `package.json` `"private": true` with no `name`, `bin`, `exports`, or
+`files`. Nothing of the design existed as code.
 
 ## Background
 
@@ -20,13 +25,13 @@ Per-question evidence is in
 [`docs/staging/qa-composable-skills-tooling.md`](../staging/qa-composable-skills-tooling.md).
 This plan is only the *how* and the order.
 
-Two superseded documents remain at the repo root for their evidence rather than their
+One superseded document remains at the repo root for its evidence rather than its
 conclusions: [`composable-agent-skills.md`](../../composable-agent-skills.md), the original
-monorepo plan, and [`REVIEW-FINDINGS.md`](../../REVIEW-FINDINGS.md), a five-way adversarial
-review of it. The review re-verified roughly 45 of ~55 factual claims and reproduced an
-empirical git-hook matrix independently; that work stands. Its headline recommendation does
-not — it rests on reading *"injected commands never prompt for permission"* as *"always run"*,
-when the mechanism is fail-closed.
+monorepo plan. The five-way adversarial review of it — since removed from the repo —
+re-verified roughly 45 of ~55 factual claims and reproduced an empirical git-hook matrix
+independently; that work stands. Its headline recommendation does not — it rests on reading
+*"injected commands never prompt for permission"* as *"always run"*, when the mechanism is
+fail-closed.
 
 Facts that constrain the build, verified against Claude Code 2.1.237 and `codex-cli` 0.147.0:
 
@@ -47,7 +52,7 @@ Facts that constrain the build, verified against Claude Code 2.1.237 and `codex-
 Published **publicly to npm as `composable-skills`**, unscoped. The name is unclaimed
 (`registry.npmjs.org/composable-skills` → 404 as of 2026-08-20). Publishing publicly makes
 issue triage, a cross-platform CI matrix, and semver on the directive syntax into real
-obligations, in a repo that currently runs no tests — accepted deliberately.
+obligations, in a repo that ran no tests at the time — accepted deliberately.
 
 - `package.json`: `"name": "composable-skills"`, drop `"private"`, add `bin`, `files`,
   `engines`, `license`, `repository`. No `main`, no `exports` for JS, no `.d.ts` — nothing
@@ -138,8 +143,8 @@ with the primitives `include:` and `slot` both build on. It was scoped out of th
 than deferred by accident: that pass was a fixed list of findings and this is a refactor, not one
 of them. It was to land **before Phase 2's `init`**, while `directives.ts` still had few callers;
 Phase 2 shipped without it, so that window has closed. Still open, and no worse for it — the
-module's callers in `src/` are unchanged at `build.ts` and `validate.ts`, since neither `init.ts`
-nor `override.ts` imports it.
+module's callers in `src/` are still only two, `validate.ts` and the `compile.ts` later split out
+of `build.ts`, since neither `init.ts` nor `override.ts` imports it.
 
 > **Do not read `src/layout.ts` as this item.** That file exists and is *filesystem* layout — the
 > path and filename constants, `stateDir`, `toolVersion`. The name collides; the work does not.
@@ -274,7 +279,7 @@ something is already confusing, and nothing else in the design may depend on it 
 | `src/init.ts` | new — config, hook entry, gitignore; diff-first |
 | `src/override.ts` | new — path derivation, seeding |
 | `src/explain.ts` | new — provenance |
-| `README.md` | rewrite — currently the `bun init` boilerplate |
+| `README.md` | rewrite — at the time the `bun init` boilerplate |
 
 ## Open questions
 

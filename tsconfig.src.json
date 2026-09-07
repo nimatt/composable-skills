@@ -4,6 +4,14 @@
   // `lib` is pinned for the same reason: ES2023 is the language level node 20 implements, and
   // package.json declares `engines.node: ">=20"`. Inheriting ESNext would admit e.g.
   // `Object.groupBy` (node 21) or `Promise.withResolvers` (node 22) with no compile error.
+  //
+  // That pin covers language-level globals and nothing else — it is not a floor check for node's
+  // own API surface. `types: ["node"]` resolves whatever `@types/node` the lockfile has (^26
+  // today), and those types describe every builtin regardless of the node version it landed in,
+  // so `fs.globSync` (node 22) or `process.getBuiltinModule` (node 22.3) typecheck clean here and
+  // would then throw "is not a function" for a user on node 20. There is no clean way to pin the
+  // types to the node 20 surface, so the check lives elsewhere: the `smoke` job in
+  // .github/workflows/ci.yml executes every verb on node 20, 22 and 24. Keep it that way.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "lib": ["ES2023"],

@@ -29,9 +29,9 @@ Two harness facts constrain everything below, both verified against Claude Code 
   trust doesn't gate this field"*; `hooks` registers hooks that persist for the rest of the
   session, with no dialog. Neither may be reachable from an untracked personal file.
 
-A prior design ([`composable-agent-skills.md`](../../composable-agent-skills.md)) and a
-five-way adversarial review of it ([`REVIEW-FINDINGS.md`](../../REVIEW-FINDINGS.md)) are
-preserved for their evidence rather than their conclusions; the review's headline
+A prior design ([`composable-agent-skills.md`](../../composable-agent-skills.md)) is preserved
+for its evidence rather than its conclusions. The five-way adversarial review it went through
+is cited under *Alternatives Considered* below but is no longer kept in the repo: its headline
 recommendation rests on reading "injected commands never prompt" as "always run", which is
 backwards. The reasoning that produced this ADR is in
 [`docs/staging/qa-composable-skills-tooling.md`](../staging/qa-composable-skills-tooling.md).
@@ -226,5 +226,4 @@ skills-repo team's decision, so this belongs to whoever builds that repo's relea
   resolution chains, and verb surface this decision produces
 - [`docs/staging/qa-composable-skills-tooling.md`](../staging/qa-composable-skills-tooling.md) —
   the grilling session this was promoted from, with per-question evidence
-- [`docs/plans/composable-skills-tooling.md`](../plans/composable-skills-tooling.md) — sequencing
 - [`docs/CONTEXT.md`](../CONTEXT.md) — glossary; "consuming repo" vs "developer" in particular

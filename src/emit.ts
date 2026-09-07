@@ -5,7 +5,7 @@ import type { CompiledSkill, Config, Diagnostic, Root } from "./types.ts";
 import { describe, error, warning } from "./types.ts";
 import { OUTPUT_FILENAME, OWNER_MARKER } from "./layout.ts";
 import { createdAtFromName, isMissing, pathExists, removeQuietly, uniqueSuffix } from "./fsutil.ts";
-import { markerContent, ownedByThisBuild, standingOf } from "./ownership.ts";
+import { markerContent, markedByThisBuildFor, ownedByThisBuild, standingOf } from "./ownership.ts";
 
 const TMP_PREFIX = ".composable-skills-tmp-";
 const OLD_PREFIX = ".composable-skills-old-";
@@ -57,13 +57,19 @@ export function emitSkill(
   const staging = path.join(target.path, `${TMP_PREFIX}${skill.name}-${uniqueSuffix()}`);
   try {
     fs.mkdirSync(staging, { recursive: true });
+    /**
+     * The marker goes in before the content rather than after it, so that a staging directory
+     * abandoned by a build that died mid-copy still says whose it was. `pruneTarget` sweeps only
+     * scratch it can attribute to this repo, and what it cannot attribute it leaves where it is —
+     * so an unmarked staging directory would sit in a shared target forever.
+     */
+    fs.writeFileSync(path.join(staging, OWNER_MARKER), markerContent(skill.name, config), "utf8");
     for (const extra of skill.extras) {
       const to = path.join(staging, ...extra.rel.split("/"));
       fs.mkdirSync(path.dirname(to), { recursive: true });
       fs.copyFileSync(extra.from, to);
     }
     fs.writeFileSync(path.join(staging, OUTPUT_FILENAME), skill.content, "utf8");
-    fs.writeFileSync(path.join(staging, OWNER_MARKER), markerContent(skill.name, config), "utf8");
     swapIntoPlace(staging, destination, target.path);
     return "written";
   } catch (cause) {
@@ -138,10 +144,20 @@ export function pruneTarget(
   let pruned = 0;
   for (const entry of entries) {
     const full = path.join(target.path, entry.name);
-    if (entry.name.startsWith(TMP_PREFIX) || entry.name.startsWith(OLD_PREFIX)) {
-      // A young scratch directory may be a concurrent build's staging area, or the only copy of
-      // another build's last good output while its swap is in flight. Leave those alone.
-      if (isStaleScratch(full)) removeQuietly(full);
+    const scratchPrefix = scratchPrefixOf(entry.name);
+    if (scratchPrefix !== null) {
+      /**
+       * Two gates, because a target may be shared and pruning is the only unowned destructive
+       * operation this tool performs. A young scratch directory may be a concurrent build's
+       * staging area, or the only copy of another build's last good output while its swap is in
+       * flight; an old one may still be *another repo's*, parked by a build that was killed
+       * between the two renames, and deleting that is the same wrong as pruning a foreign skill.
+       * A link is neither: nothing is read through it, and a marker found by following it would
+       * describe its destination rather than this entry. Anything that cannot be attributed stays.
+       */
+      const ours =
+        !entry.isSymbolicLink() && scratchOwnedByThisBuild(full, entry.name, scratchPrefix, config);
+      if (ours && isStaleScratch(full)) removeQuietly(full);
       continue;
     }
     // `isDirectory()` is already false for a symlink dirent, so this arm is the only thing that
@@ -158,6 +174,27 @@ export function pruneTarget(
     }
   }
   return pruned;
+}
+
+function scratchPrefixOf(name: string): string | null {
+  if (name.startsWith(TMP_PREFIX)) return TMP_PREFIX;
+  if (name.startsWith(OLD_PREFIX)) return OLD_PREFIX;
+  return null;
+}
+
+/**
+ * Every scratch directory is named `<prefix><skill>-<suffix>` for the skill it holds, and carries
+ * that skill's marker. Owning it is both halves agreeing: the marker is this repo's, and the name
+ * is one this build's own naming would have produced for the skill the marker declares. The name
+ * is what stands in for `readMarker`'s basename check, which a scratch name cannot answer.
+ */
+function scratchOwnedByThisBuild(
+  directory: string,
+  name: string,
+  prefix: string,
+  config: Config,
+): boolean {
+  return markedByThisBuildFor(directory, config, (skill) => name.startsWith(`${prefix}${skill}-`));
 }
 
 function isStaleScratch(directory: string): boolean {

@@ -52,3 +52,51 @@ export function createdAtFromName(name: string): number | null {
   const created = Number.parseInt(digits, 36);
   return Number.isSafeInteger(created) ? created : null;
 }
+
+/**
+ * A directory this tool derived and is about to write files into, which must therefore be the
+ * directory itself and not a link standing where it should be. A symlinked `.composable-skills`
+ * redirects the log, the stamp and the lock at once — every one of them outside the repo, which
+ * invariants 7 and 8 both forbid — so it is refused rather than followed. The `mkdir` comes first
+ * because a link to a directory is only visible to `lstat` once there is something at the path at
+ * all, and a recursive `mkdir` neither creates nor rewrites what is already there.
+ */
+export function ensureRealDir(directory: string): void {
+  fs.mkdirSync(directory, { recursive: true });
+  if (fs.lstatSync(directory).isSymbolicLink()) {
+    throw new Error(`refusing to write through the symlink at ${directory}`);
+  }
+}
+
+export interface NoFollowWrite {
+  handle: number;
+  /** Whether a symlink was standing at the path and was removed to get at the real one. */
+  removedSymlink: boolean;
+}
+
+/**
+ * `writeFileSync` follows a symlink standing at its destination and truncates whatever it points
+ * at, so a link planted at a path this tool derived — `<state>/build.log`, `<state>/stamp` — would
+ * make the build overwrite an arbitrary file anywhere on the disk. The link is unlinked rather
+ * than written through, the way a `rename` into place would replace it, and `O_NOFOLLOW` is what
+ * closes the window between the two on a kernel that has the flag. A *hard* link planted at the
+ * same path is still truncated — `lstat` cannot tell one from a regular file and `O_NOFOLLOW` does
+ * not apply — but a hard link is not representable in a repository, so nothing a checkout carries
+ * can plant one.
+ */
+export function openForWriteNoFollow(file: string, mode: number): NoFollowWrite {
+  const removedSymlink = unlinkIfSymlink(file);
+  const noFollow = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
+  const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | noFollow;
+  return { handle: fs.openSync(file, flags, mode), removedSymlink };
+}
+
+function unlinkIfSymlink(file: string): boolean {
+  try {
+    if (!fs.lstatSync(file).isSymbolicLink()) return false;
+  } catch {
+    return false;
+  }
+  fs.unlinkSync(file);
+  return true;
+}

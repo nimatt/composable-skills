@@ -166,3 +166,78 @@ describe("cli — help after a verb is a request for help", () => {
     expect(cli(ws, ["explain"]).stderr).toContain("planned for phase 5");
   });
 });
+
+/**
+ * **Finding 14.** `main()`'s three catch blocks and the `reportCrash` they call had no test at
+ * all, and the `build` one carries a clause of the contract rather than a courtesy:
+ * `tool-contract.md` says `build` "exits 0 unconditionally, including on failure", because it runs
+ * at `SessionStart` and a non-zero exit is reported to the developer as a broken session. That
+ * clause is only interesting in the case these blocks exist for — a throw escaping the verb — and
+ * the one outcome the fail-soft design forbids is `reportCrash` itself failing and taking the exit
+ * code with it.
+ *
+ * Nothing a workspace can contain gets a throw out of a verb: every `fs` call inside one is
+ * already guarded, which is the whole design. So the crash is injected at a call nobody guards —
+ * see `BrokenCall` in the fixture for which two, and why those.
+ */
+describe("cli — a throw that escapes a verb", () => {
+  test("build still exits 0, and the crash reaches all three channels", () => {
+    const ws = repo();
+
+    const run = cli(ws, ["build"], { breaks: ["os.hostname"] });
+
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("composable-skills: error build failed:");
+    expect(run.stderr).toContain("composable-skills: error build failed:");
+    // The log is the channel that exists for exactly this: a session hook's streams are read by a
+    // model, if at all, and a crash is what the developer will want to go back and look at.
+    expect(read(ws.repo, ".composable-skills/build.log")).toContain("build failed:");
+  });
+
+  /**
+   * The same clause, in the case that also breaks the crash report's own footing: `crashStateDir`
+   * resolves the log's directory from the working directory, so a crash caused by losing that
+   * directory leaves `reportCrash` with nowhere to write. It must still not throw — `build`'s exit
+   * code is what a session hook reads, and 0 is the only answer it may ever give.
+   */
+  test("build still exits 0 when the crash took the log's own path down with it", () => {
+    const ws = repo();
+
+    const run = cli(ws, ["build"], { breaks: ["process.cwd"] });
+
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain("composable-skills: error build failed:");
+    expect(exists(ws.repo, ".composable-skills")).toBe(false);
+  });
+
+  // `--check` is the documented exception to the exit-0 rule: it is run by a person or by CI, who
+  // are entitled to a verdict, and a crash is not a passing one.
+  test("build --check exits 1 instead, and writes nothing", () => {
+    const ws = repo();
+
+    const run = cli(ws, ["build", "--check"], { breaks: ["process.cwd"] });
+
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain("composable-skills: error build failed:");
+    expect(exists(ws.repo, ".composable-skills")).toBe(false);
+  });
+
+  // Neither writing verb runs unattended, so both answer a crash the ordinary way.
+  test("init reports the crash and exits 1", () => {
+    const ws = bare();
+
+    const run = cli(ws, ["init"], { breaks: ["process.cwd"] });
+
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain("composable-skills: error init failed:");
+  });
+
+  test("override reports the crash and exits 1", () => {
+    const ws = repo();
+
+    const run = cli(ws, ["override", "reviewer", "extra-checks"], { breaks: ["process.cwd"] });
+
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain("composable-skills: error override failed:");
+  });
+});

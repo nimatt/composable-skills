@@ -95,10 +95,10 @@ authoritative statement.
 _Avoid_: install location, output (ambiguous with the compiled skill itself)
 
 **Marker**:
-The file the tool leaves inside every skill directory it emits, naming the tool and the repo that
-built it; a directory without one is never overwritten — nor is a target entry that is a
-symlink, whose marker is not read through it — and only a directory whose marker names *this*
-build is ever pruned.
+The file the tool leaves inside every skill directory it emits, naming the tool, the skill
+directory it belongs to, and the repo that built it; a directory without one is never
+overwritten — nor is a target entry that is a symlink, whose marker is not read through it — and
+only a directory whose marker names *this* build is ever pruned.
 _Avoid_: lock file, manifest (it records one directory's ownership, not a list of skills)
 
 **Stamp**:

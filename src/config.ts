@@ -255,7 +255,14 @@ function expandVariables(
     diagnostics.push(kind === "source" ? error(message) : warning(message));
     return null;
   }
-  const expanded = spec.replaceAll("${home}", home).replaceAll("${id}", id ?? "");
+  /**
+   * Replacer functions, not replacement strings: `String.prototype.replaceAll` expands `$$`, `$&`,
+   * `` $` ``, `$'` and `$1` inside a *string* replacement, so a `$` anywhere in the home path — a
+   * path this tool takes from the environment and never chose — would rewrite the substitution
+   * instead of being inserted literally, and the resulting root then fails its own `${home}`
+   * containment check.
+   */
+  const expanded = spec.replaceAll("${home}", () => home).replaceAll("${id}", () => id ?? "");
   return expandTilde(expanded);
 }
 
@@ -685,6 +692,20 @@ function subpathFailureDiagnostic(
 interface ResolvedRoots {
   roots: Root[];
   /**
+   * Entries that named something and could not be used: a package that did not resolve, a
+   * `${home}` escape, a `${id}` with no `id` declared, a path root that is not there. Counted
+   * rather than derived from `specs.length - roots.length`, because an **empty** entry is not one
+   * of these — it names nothing that could be unusable, so there is no source to have lost, and
+   * deriving the count would let a single `""` in `sources` suppress pruning for the life of the
+   * config while reporting a root that could not be read.
+   *
+   * **Meaningful for `sources` only.** `loadConfig` takes nothing but `.roots` off the `overrides`
+   * and `targets` calls, and deliberately: a `${id}` entry with no `id` declared increments this,
+   * while for those two lists it is a warning and nothing more. Wiring this up for them would turn
+   * a warn-only case into one that suppresses pruning for the life of the config.
+   */
+  unusable: number;
+  /**
    * A source resolved, and to a place this build cannot vouch for: it stepped over a level holding
    * a package, or one it was not allowed to check. Pruning hangs on this for the reason an
    * unreadable root does — the corpus that resolved may not be the corpus that exists, and a
@@ -704,6 +725,7 @@ function resolveRoots(
   diagnostics: Diagnostic[],
 ): ResolvedRoots {
   const roots: Root[] = [];
+  let unusable = 0;
   let doubtful = false;
   for (const spec of specs) {
     if (spec.trim() === "") {
@@ -711,13 +733,17 @@ function resolveRoots(
       continue;
     }
     const expanded = expandVariables(spec, home, id, kind, diagnostics);
-    if (expanded === null) continue;
+    if (expanded === null) {
+      unusable++;
+      continue;
+    }
 
     let resolved: string;
     if (kind === "source" && !isPathLike(expanded)) {
       const resolvedPackage = resolvePackageRoot(expanded, repoRoot);
       if ("failure" in resolvedPackage) {
         diagnostics.push(...packageFailureDiagnostic(spec, repoRoot, resolvedPackage.failure));
+        unusable++;
         continue;
       }
       resolved = resolvedPackage.path;
@@ -735,6 +761,7 @@ function resolveRoots(
       const outside = homeEscape(home, resolved);
       if (outside !== null) {
         diagnostics.push(error(`${kind} "${spec}" ${outside} — skipped`));
+        unusable++;
         continue;
       }
     }
@@ -748,11 +775,12 @@ function resolveRoots(
             `"sources" at an installed package`,
         ),
       );
+      unusable++;
       continue;
     }
     roots.push({ spec, path: resolved });
   }
-  return { roots, doubtful };
+  return { roots, unusable, doubtful };
 }
 
 /**
@@ -790,7 +818,7 @@ function rootContains(root: string, candidate: string): boolean {
   return isAtOrUnder(canonicalPath(root), canonicalPath(candidate));
 }
 
-function firstOutputInside(source: Root, config: Config): string | null {
+function firstOutputInside(root: Root, config: Config): string | null {
   const state = stateDir(config.repoRoot);
   const outputs = [
     ...config.targets.map((target) => ({
@@ -799,30 +827,37 @@ function firstOutputInside(source: Root, config: Config): string | null {
     })),
     { path: state, label: `the build state directory ${state}` },
   ];
-  return outputs.find((output) => rootContains(source.path, output.path))?.label ?? null;
+  return outputs.find((output) => rootContains(root.path, output.path))?.label ?? null;
 }
 
 /**
- * Compiled output and build state sitting inside a source root are inputs to the next run's stamp:
- * `listEntries` walks a source root with no exclusions, so a build changes the hash that was
- * supposed to say nothing had changed. How badly depends on what is inside. A target alone
- * settles after one extra rebuild, since the stamp is computed before anything is written and the
- * output is byte-stable; the build state directory never settles at all, because the stamp file
- * and `build.log` are rewritten every run — `--check` is then stale forever. Both are worth
- * saying, and neither is worth failing over, so this warns once per source root, naming the first
- * thing found inside it.
+ * Compiled output and build state sitting inside a hashed root are inputs to the next run's stamp:
+ * `computeStamp` walks every source *and* override root with no exclusions, so a build changes the
+ * hash that was supposed to say nothing had changed. How badly depends on what is inside. A target
+ * alone settles after one extra rebuild, since the stamp is computed before anything is written and
+ * the output is byte-stable; the build state directory never settles at all, because the stamp file
+ * and `build.log` are rewritten every run — `--check` is then stale forever. Both are worth saying,
+ * and neither is worth failing over, so this warns once per root, naming the first thing found
+ * inside it.
+ *
+ * Both lists, because the stamp hashes both: an override root holding a target or the state
+ * directory is the identical failure, and covering only `sources` left it undiagnosed.
  */
-function outputsInsideSources(config: Config): Diagnostic[] {
+function outputsInsideHashedRoots(config: Config): Diagnostic[] {
   const advice: Diagnostic[] = [];
-  for (const source of config.sources) {
-    const offender = firstOutputInside(source, config);
+  const hashed: { kind: "source" | "override"; root: Root }[] = [
+    ...config.sources.map((root) => ({ kind: "source" as const, root })),
+    ...config.overrides.map((root) => ({ kind: "override" as const, root })),
+  ];
+  for (const { kind, root } of hashed) {
+    const offender = firstOutputInside(root, config);
     if (offender === null) continue;
     advice.push(
       warning(
-        `source root "${source.spec}" at ${source.path} contains ${offender}, which the next ` +
+        `${kind} root "${root.spec}" at ${root.path} contains ${offender}, which the next ` +
           `build's stamp hashes as an input — so a build recompiles when nothing changed, and ` +
-          `where the build state is inside a source root "build --check" reports stale forever. ` +
-          `Keep compiled output and build state outside the source roots.`,
+          `where the build state is inside such a root "build --check" reports stale forever. ` +
+          `Keep compiled output and build state outside the ${kind} roots.`,
       ),
     );
   }
@@ -908,11 +943,11 @@ export function loadConfig(
     sources: sources.roots,
     overrides: resolveRoots(overrideSpecs, "override", repoRoot, home, id, diagnostics).roots,
     targets: resolveRoots(targetSpecs, "target", repoRoot, home, id, diagnostics).roots,
-    sourcesIncomplete: sources.roots.length < sourceSpecs.length || sources.doubtful,
+    sourcesIncomplete: sources.unusable > 0 || sources.doubtful,
   };
 
   if (config.sources.length === 0) {
     diagnostics.push(warning("no usable source roots — no skills to compile"));
   }
-  return { config, diagnostics, buildAdvice: outputsInsideSources(config) };
+  return { config, diagnostics, buildAdvice: outputsInsideHashedRoots(config) };
 }

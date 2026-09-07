@@ -40,6 +40,34 @@ npm install --save-dev composable-skills
 repo-relative, which also pins the tool's version alongside the templates it compiles. Yarn PnP
 is out of scope — it has no `node_modules`, so the path-based invocation breaks.
 
+## Development
+
+Until there is a release, a checkout is the only way to run the tool. Bun is the development
+runtime, the test runner and the bundler; the shipped artifact is not — `src/` uses `node:*`
+APIs only and is bundled with `--target=node`, and CI executes that bundle on node 20, 22 and
+24 to keep `engines` honest.
+
+```bash
+bun install
+bun test           # the whole suite
+bun run typecheck  # src/ against node's globals, then the whole tree including test/
+bun run lint       # biome check
+bun run build      # bun build ./src/cli.ts --target=node --outdir=dist
+```
+
+Either entry point runs the CLI: `bun src/cli.ts <verb>` straight from source, or
+`node dist/cli.js <verb>` for the bundle a user would install, once `bun run build` has
+produced it. Both act on the working directory they are run in, so try them in a scratch
+directory with a `composable-skills.jsonc` of its own rather than in the checkout — `build`
+and `init` write into whatever repo they find themselves in, and this one is not a consuming
+repo.
+
+```bash
+mkdir -p /tmp/scratch/skills/templates && cd /tmp/scratch
+printf '{ "id": "scratch", "sources": ["./skills/templates"] }\n' > composable-skills.jsonc
+bun /path/to/composable-skills/src/cli.ts build
+```
+
 ## A worked example
 
 A repo that installs the tool is a **consuming repo** — either a **skills repo**, whose product
@@ -57,8 +85,10 @@ tracked file at the repo root, carrying only locations and never content.
 }
 ```
 
-`id` is declared, never derived from the path, so a git worktree and the main checkout resolve
-the same overrides. `${home}` is `${XDG_CONFIG_HOME:-~/.config}/composable-skills`, relocatable
+`id` is declared, and nothing re-derives it from the path, so a git worktree and the main
+checkout resolve the same overrides. `init` seeds a new config's `id` from the directory name and
+says so beside it: a starting point to change, not an identity — two unrelated repos both cloned
+as `api` are seeded alike and collide until one of them says otherwise. `${home}` is `${XDG_CONFIG_HOME:-~/.config}/composable-skills`, relocatable
 via `COMPOSABLE_SKILLS_HOME`. All three lists are ordered; **later entries win in the first two,
 and every target is written on every build**. For Codex, add `./.agents/skills` (not
 `.codex/skills`).
@@ -398,7 +428,6 @@ it had to create and noting that those skills arrive in the next session.
 
 - [`docs/specs/tool-contract.md`](docs/specs/tool-contract.md) — the full contract
 - [`docs/decisions/0001-build-time-composition.md`](docs/decisions/0001-build-time-composition.md) — the rationale
-- [`docs/plans/composable-skills-tooling.md`](docs/plans/composable-skills-tooling.md) — the roadmap
 - [`docs/CONTEXT.md`](docs/CONTEXT.md) — glossary
 
 ## License

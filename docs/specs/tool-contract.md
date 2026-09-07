@@ -55,7 +55,7 @@ anywhere above it, and the defaults below apply. An unknown key warns and is ign
 
 | Key | Meaning |
 |---|---|
-| `id` | Stable identity for this repo. **Declared, never derived from the path** — a worktree at `.claude/worktrees/feat-x` and the main checkout are one repo and must resolve the same overrides, and two unrelated repos both cloned as `api` must not collide. It is interpolated into a path, so it must be a single path segment of `[A-Za-z0-9._-]`, and neither `.` nor `..`; a violation is **fatal**. |
+| `id` | Stable identity for this repo. **Declared, and resolved from the declaration alone** — no verb ever derives it from the path it is run in, which is what makes a worktree at `.claude/worktrees/feat-x` and the main checkout one repo that resolves one set of overrides. `init` *seeds* a fresh config from the directory name, and says beside the value that it did: a seed is a starting point, not an identity, so two unrelated repos both cloned as `api` are seeded alike and would collide — where that matters, changing the declaration is the developer's to do and nothing later re-derives it. It is interpolated into a path, so it must be a single path segment of `[A-Za-z0-9._-]`, and neither `.` nor `..`; a violation is **fatal**. |
 | `sources` | Template roots. Each entry is resolved as an installed package or as a path. |
 | `overrides` | Override roots. Scanned in reverse, so a later entry takes precedence. |
 | `targets` | Output directories. All are written on every build. |
@@ -199,9 +199,16 @@ makes a `references/` directory reach the harness alongside the compiled `SKILL.
 are reserved at the directory's top level — `SKILL.md` and the ownership marker, **in any case**,
 since `skill.md` is the same file as `SKILL.md` on macOS and Windows — because the compiler
 writes those itself; supplying either is a rejection. The template's own `SKILL.md.tmpl` is not a
-collision and is simply consumed. A symlink inside a skill directory is not copied, and warns; a
-skill directory that is *itself* a symlink is not followed, warns, and blocks pruning for that
-run, since following it would read a template from outside every configured source root.
+collision and is simply consumed — **in any case** as well, and for the same reason: where
+`skill.md.tmpl` is the file that was found and compiled, an exact-case reading would not
+recognise it as the template and would copy it verbatim, putting the raw slot and include
+directives into the emitted skill directory beside the `SKILL.md` compiled from them. A symlink
+inside a skill directory is not copied, and warns; a skill directory that is *itself* a symlink
+is not followed, since following it would read a template from outside every configured source
+root. Where that directory holds a template or otherwise looks like a skill, the refusal is said
+out loud — it warns, and blocks pruning for that run, because what was refused may be a skill
+some target still holds output for. Where nothing about it looks like one, it is skipped as
+silently as any other directory without a template, since there is nothing to have lost.
 
 Two directives. Both are HTML comments, so a template remains valid, readable markdown.
 
@@ -460,8 +467,9 @@ cannot be read; a slot declared in the frontmatter region; emitted
 frontmatter not byte-identical to the template's; an `include:` resolving outside its own source
 root, or an override resolving outside its own override root — by `..`, by a symlink hop, by a
 symlinked override root, or by naming something other than a regular file; merge-conflict
-markers in any compiled input — a
-template, an included fragment, or an override file; a duplicate slot name within one skill; a
+markers in any compiled input — a template, an included fragment, or an override file — meaning a
+`<<<<<<<` or `|||||||` line anywhere in it, and a `=======` or `>>>>>>>` line below a `<<<<<<<` in
+that same input; a duplicate slot name within one skill; a
 `SKILL.md` or an ownership marker, in any case, in the source skill directory, which would
 collide with what the compiler writes.
 
@@ -527,10 +535,13 @@ likeliest real failure in the context the file channel exists for.
   written by the build and hashed as inputs by the next one, so a build recompiles when nothing
   changed, and where the build state is inside a source root `--check` reports stale forever.
 - *discovery and compilation* — a directory holding a `SKILL.md` or a `*.tmpl` but no
-  `SKILL.md.tmpl`; a skill directory that is a symlink, which is not followed; a template or a
-  skill directory that cannot be read; a skill name colliding across sources; a symlink inside a
-  skill directory, which is not copied; an override file matching no declared slot; an override
-  file, or an override root, that exists but cannot be read — distinct from a root that simply
+  `SKILL.md.tmpl`; a skill directory that is a symlink holding a template or otherwise looking
+  like a skill, which is not followed; a template or a skill directory that cannot be read; a
+  skill name colliding across sources; a symlink inside a skill directory, which is not copied;
+  a `=======` or `>>>>>>>` line with no `<<<<<<<` above it in the same input, which is either a
+  hand-resolved conflict's remnant or legal Markdown and cannot be told apart from the line alone;
+  an override file matching no declared slot; an override file, or an override root, that exists
+  but cannot be read — distinct from a root that simply
   does not exist, which is the ordinary fall-through and not a diagnostic; a template using a
   frontmatter field a configured target does not support (see *Targets*).
 - *writing and pruning* — a directory of that name that exists and carries no marker, left
@@ -549,9 +560,15 @@ input is probably a mistake; and decline, with a warning, when something already
 not this tool's to replace.** The first two classify *inputs*; the third classifies what the
 build finds standing where it is about to write, which is neither the developer's mistake nor a
 reason to fail that skill everywhere else. A developer's typo never breaks a build. A conflict
-marker reaching the model always does. And an unmarked directory, or a symlink, occupying the
-place a compiled skill would take keeps that place — the build says so and writes the skill to
-every other target.
+marker reaching the model always does — with one carve-out. A `=======` or `>>>>>>>` line with no
+`<<<<<<<` above it in the same input is warned rather than rejected, because each of those two
+lines is also legal Markdown — a setext H1 underline, and a seven-deep blockquote — and the scan
+reads one input at a time, so from the line alone it cannot tell a hand-resolved conflict's
+remnant from a correct document. Rejecting there failed builds over correct documents, which is
+the worse trade: the warning still names the line, so nothing reaches the model unremarked, and it
+spells out both readings for the one person who can settle which it is. And an unmarked directory,
+or a symlink, occupying the place a compiled skill would take keeps that place — the build says so
+and writes the skill to every other target.
 
 **A target that did not exist before the run is named in the summary**, where anything was in
 fact built. A skills directory that was not there when the session started is not picked up, so
@@ -611,27 +628,62 @@ may be shared:
   Saying whose marker is on the file is what turns a permanent unexplained rebuild into something
   a developer can act on. The foreign content never gates a build: its hash is not the recorded
   one, so the record does not describe the disk.
-- **A marker's fields are read as untrusted text.** It is written by another build — that is the
-  point of it — so `id` is a string this tool never validated and `repo` a path it never
-  resolved, and the collision warning above quotes whichever of them names the owner. A marker
-  declaring an `id` outside the shape invariant 5 requires, carrying a control character or a
-  line terminator in any field, or carrying a field longer than a path can be, is not a marker:
-  it reads as **unmarked**, the conservative end, so the directory is neither overwritten nor
-  pruned. **The marker file is opened without following a symlink**, and a link at that path
-  reads as unmarked for the same reason — invariant 8 one level below the skill directory it
-  already covers, since what the link named would otherwise be read as a claim about *this*
-  directory.
+- **A marker's fields are read as untrusted text, and what makes a file a marker is a closed
+  list.** It is written by another build — that is the point of it — so `id` is a string this
+  tool never validated and `repo` a path it never resolved, and the collision warning above
+  quotes whichever of them names the owner. A file at that path is a marker only where it is a
+  regular file, no larger than a marker could be, that this build could read end to end, and that
+  parses as a JSON object that: names this tool, in a `tool` field spelled exactly
+  `composable-skills`; carries a `skill` that fits the name of the directory it sits in — equal to
+  it, for the directory a compiled skill stands in — since a marker naming some other skill was
+  copied there rather than written there; and declares at least one of `id` and `repo`, because a
+  marker naming no owner at all would otherwise make an unmarked directory overwritable. A field of either longer than a path can be is not that
+  field — that length is the bound on how much borrowed text one warning can put in front of a
+  model — so where the one that remains names nobody the file is not a marker. A declared `id`
+  outside the shape invariant 5 requires is not an `id`, and where `repo` is then absent too the
+  file names nobody and is not a marker. **Regular file** is the whole of what is
+  read: an entry of that name that is a symlink, a FIFO, a socket or a directory is refused on the
+  `stat` before anything opens it — which is also what keeps a named pipe planted in a shared
+  target from blocking a build that would otherwise wait for a writer. **No larger than a marker
+  could be** is a bound taken from those same field bounds, so a file over it is padding around a
+  marker rather than one, however valid the JSON inside it; and a file that cannot be opened or
+  read is simply a file this build has learnt nothing from. Anything failing that list reads as
+  **unmarked**, the conservative end, so the directory is neither overwritten nor pruned.
+  **The scratch sweep below asks that same list with the one clause put differently.** A scratch
+  directory's name is not a skill name and can never be equal to one, so where such an entry is
+  being weighed, `skill` fits the name by the name being one this build's own naming would have
+  produced for the skill declared — `<prefix><skill>-<suffix>`. It is the same question the
+  equality asks, put to the only name a scratch directory has, and it is asked for the same
+  reason: a marker copied out of any owned skill directory into any scratch name would otherwise
+  hand this build the right to delete it. `skill` is weighed against a name either way and never
+  taken on the field's own word, which is what keeps it bounded by a filename rather than by
+  nothing — the reading the size bound above rests on. Every other clause of the list is
+  unchanged.
+  **A control character is not one of the failures.** `skill` is a directory name and `repo` a
+  repo root: both are copied from the filesystem rather than chosen, and a TAB, a ZWJ or a soft
+  hyphen is legal in either — so refusing one here would void markers this tool had just written
+  itself, leaving skill directories it had compiled a moment earlier neither rewritable nor
+  prunable, under a warning blaming the developer for them. Keeping borrowed text from forging a
+  line is the renderer's job and not the reader's: **every report line is normalised to one line
+  as it is rendered**, stated above and applied at the single point every channel renders through,
+  so no field quoted from a marker can end a line or move a cursor. **The marker file is opened
+  without following a symlink**, and a link at that path reads as unmarked for the same reason —
+  invariant 8 one level below the skill directory it already covers, since what the link named
+  would otherwise be read as a claim about *this* directory.
 - **A build identifies itself by `id`** where both the marker and the current config declare one,
   and by repo root path otherwise. With no `id`, a worktree therefore does not recognise the main
   checkout's output and declines to prune it — the conservative direction, and one more reason
   invariant 5 wants `id` declared.
 - If the source corpus could not be enumerated end to end, **nothing is pruned for that entire
   run** — a source root that did not resolve, one that cannot be read, a skill directory whose
-  template cannot be read, or a skill directory that turned out to be a symlink. What the build
-  could not read is indistinguishable from what was deleted upstream. **A source root that
-  resolved doubtfully counts the same way**: where the walk stepped over a level a nearer copy of
-  the package could have been sitting behind, the corpus that resolved may not be the corpus that
-  exists, and a substituted package with no skills of its own would otherwise empty the target.
+  template cannot be read, or a skill directory that turned out to be a symlink *and* held a
+  template or otherwise looked like a skill. What the build could not read is indistinguishable
+  from what was deleted upstream. A symlink with nothing skill-shaped behind it is not that case:
+  it is a directory this build would have skipped whether or not it was a link, so it leaves
+  pruning alone. **A source root that resolved doubtfully counts the same way**: where the walk
+  stepped over a level a nearer copy of the package could have been sitting behind, the corpus
+  that resolved may not be the corpus that exists, and a substituted package with no skills of
+  its own would otherwise empty the target.
 - A **target** that exists but cannot be enumerated is that same observation pointed the other
   way, and **nothing in that target is pruned** — the build warns, naming the target, and goes on
   writing to the others. The scope differs because the cause does: a source root that cannot be
@@ -643,10 +695,44 @@ may be shared:
   *roots*; a config that lost its `sources` key does, and pruning on that reading would delete
   every compiled skill on the machine. The build warns and names what it declined to remove.
 
-Pruning is the only destructive operation the tool performs, and it is what stops a renamed or
-removed template leaving a stale skill in front of the model forever. Each of the guards above
-is a case where "this skill is gone" and "I could not see this skill" are the same observation,
-and the tool always reads it the second way.
+Pruning is one of the two destructive operations the tool performs, and it is what stops a
+renamed or removed template leaving a stale skill in front of the model forever. Each of the
+guards above is a case where "this skill is gone" and "I could not see this skill" are the same
+observation, and the tool always reads it the second way.
+
+The other is the **scratch sweep**, which runs in the same pass. A build stages each skill in a
+temp directory inside the target and swaps it into place, parking the live output under a second
+scratch name for the length of the swap; a build that dies between those steps leaves one of
+those directories behind, and nothing else would ever remove it. They are named
+`.composable-skills-tmp-<skill>-<suffix>` and `.composable-skills-old-<skill>-<suffix>`, and
+neither is ever a compiled skill, so the question the pruning rule asks — does this skill still
+exist in a `sources` root — is not asked of them and the keep set is not consulted. Every guard
+above that blocks pruning for a run still stops the sweep, since it is that same pass: a build
+that could not enumerate the corpus, or could not read a target, sweeps nothing there either, and
+the litter waits for a run that can. It deletes, so it is gated instead on four things, **all**
+of which must hold:
+
+- The entry is **not a symlink**. Nothing is read through one, and a marker found by following
+  one would be a claim about its destination rather than about this entry — invariant 8 again.
+- It carries a **marker that names this build**, read by the closed list above and matched by
+  declared `id`, or by repo root where either side declares none, exactly as pruning matches one.
+  A foreign marker, or none at all, is not this build's to delete: two repos sharing
+  `~/.claude/skills` each leave scratch there, and a build of the other one killed between the
+  two renames leaves behind the only copy of its last good output.
+- That marker's `skill` **fits the entry's own name**, by the scratch reading given above — the
+  name is one this build's own naming would have produced for the skill the marker declares.
+- The directory is **older than an hour**, dated by the creation time recorded in its name, and
+  by `mtime` only for a name that records none — every scratch name written before the tool
+  recorded one, and nothing it writes today. `rename(2)` preserves `mtime`, so a parked copy
+  inherits the age of the output it was made from and would otherwise read as stale the instant
+  it was created. The window is what keeps the sweep off a concurrent build's staging area, and
+  off a parked copy whose swap is still in flight.
+
+Anything failing any of those stays exactly where it is, and the sweep says nothing either way:
+removing this build's own litter is housekeeping, not news. So that the marker gate does not
+turn every interrupted build into permanent litter, **a staging directory is marked before any
+content is written into it** — a build that dies mid-copy still leaves something the next sweep
+can attribute.
 
 **One build at a time, where it can be.** A build holds a lock in the state directory; a second
 build that finds it held warns, compiles nothing, leaves the existing output untouched, and
@@ -661,7 +747,13 @@ behind by a crashed or killed build is detected and broken automatically, for th
 build can never wedge permanently. `--check` never takes the lock, since it writes nothing.
 
 The **state directory** is `.composable-skills/` at the consuming repo's root, holding the
-stamp, the build log, and that lock. Like compiled output it is generated, never tracked.
+stamp, the build log, and that lock. A fourth entry appears there only while a stale lock is
+being broken: a `lock.breaking-…` directory named after the lock it is breaking, created with
+the same `mkdir` the lock itself is, so that two builds finding one stale lock cannot both
+remove it and both take its place. It lives for the two syscalls the break takes and is then
+removed. One left behind by a build killed inside that window is aged out by a later build,
+which is what keeps "a build can never wedge permanently" true of the break as well as of the
+lock. Like compiled output the whole directory is generated, never tracked.
 
 ## The `SessionStart` hook
 
@@ -742,7 +834,12 @@ string it writes, which must stay byte-stable whatever is on disk today.
 2. **The template is the trust boundary.** Tracked, reviewable, its author's responsibility.
 3. **The config file never carries content.**
 4. **A slot's mode affects only that slot's own default** and can reach no other text.
-5. **`id` is declared, never derived from a path.**
+5. **`id` is declared, and never re-derived from a path.** Every verb reads it from the config
+   and nothing recomputes it from where it was run, which is what makes a worktree and its main
+   checkout agree about the overrides they resolve. `init` may *seed* a fresh config's value from
+   the directory name — it has to write something, and the file says so beside it — but a seed is
+   the developer's starting point, not the tool's opinion: two unrelated repos cloned as `api`
+   seed the same `id` and collide, and only a changed declaration separates them.
 6. **Nothing generated is tracked.** A convention `init` supports rather than a property the
    tool enforces: it offers the `.gitignore` lines and cannot do more (see *Not in the
    contract*).
@@ -802,6 +899,5 @@ them.
 ## See Also
 
 - [`docs/decisions/0001-build-time-composition.md`](../decisions/0001-build-time-composition.md) — why
-- [`docs/plans/composable-skills-tooling.md`](../plans/composable-skills-tooling.md) — sequencing
 - [`docs/CONTEXT.md`](../CONTEXT.md) — glossary
 - [`docs/staging/qa-composable-skills-tooling.md`](../staging/qa-composable-skills-tooling.md) — evidence

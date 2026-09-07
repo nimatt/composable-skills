@@ -1,29 +1,34 @@
+# composable-skills
 
-Default to using Bun instead of Node.js.
+A node CLI that compiles skill templates into `SKILL.md` files and writes them where an agent
+harness will find them. `README.md` is the orientation; this file is the two things that are
+easy to get wrong.
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
+## `src/` is node-only
 
-## APIs
+The shipped artifact is `dist/cli.js`, produced by `bun build ./src/cli.ts --target=node`, run
+under `#!/usr/bin/env node`, and `package.json` declares `engines: { "node": ">=20" }`. A Bun
+API in `src/` compiles fine and then fails at runtime for everyone who installs the tool. So:
 
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
+- Import from `node:*` — `node:fs`, `node:path`, `node:process`. Never `Bun.*` or `bun:*`.
+- Stay inside node 20's surface. `tsconfig.src.json` pins `lib` to ES2023, which rejects a
+  language-level global that is too new, but `@types/node` describes every builtin regardless of
+  the version it landed in — `fs.globSync` (node 22) typechecks clean and then throws for a user
+  on node 20. The `smoke` job in `.github/workflows/ci.yml` is the only thing that catches that,
+  by executing every implemented verb on node 20, 22 and 24. Keep it that way.
 
-## Testing
+`test/` carries no such constraint: it runs under `bun test` and nowhere else, so `Bun.*` and
+`bun:*` are fine there. That split is the whole rule — Bun is how this repo is built and tested,
+never what the tool runs on.
 
-Use `bun test` to run tests.
+## Bun is the tooling
 
-```ts#index.test.ts
+- `bun install`, `bun test`, `bun run typecheck`, `bun run lint`, `bun run build`, `bunx` —
+  never their npm/yarn/pnpm/jest/vitest equivalents.
+- `bun <file>` rather than `node <file>` or `ts-node <file>` for anything run ad hoc.
+- Tests import from `bun:test`:
+
+```ts
 import { test, expect } from "bun:test";
 
 test("hello world", () => {
@@ -31,76 +36,17 @@ test("hello world", () => {
 });
 ```
 
-## Frontend
+- Lint and format are biome, configured in `biome.jsonc`: `bun run lint`, `bun run format`.
+- Bun loads `.env` by itself; don't add dotenv.
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+## Where the answers are
 
-Server:
-
-```ts#index.ts
-import index from "./index.html"
-
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
-
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
-
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
-
-// import .css files directly and it works
-import './index.css';
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+- [`docs/CONTEXT.md`](docs/CONTEXT.md) — the canonical vocabulary. Its definitions bind: "the
+  tool", "consuming repo", "template", "compiled skill", "fragment", "slot", "override",
+  "target", "marker", "stamp". Read it before writing prose, and avoid the terms it lists
+  under *Avoid*.
+- [`docs/specs/tool-contract.md`](docs/specs/tool-contract.md) — the behaviour contract: config
+  schema, directives, resolution order, the verb surface, and what is rejected versus warned.
+  It is the authority when the code and your expectation disagree.
+- [`docs/decisions/0001-build-time-composition.md`](docs/decisions/0001-build-time-composition.md)
+  — why the design is shaped this way, and which alternatives were rejected and on what grounds.

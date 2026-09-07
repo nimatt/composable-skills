@@ -10,7 +10,7 @@ update the ADR or spec and add a fresh entry.
 
 Prior art, both superseded and preserved for their evidence rather than their conclusions:
 [`composable-agent-skills.md`](../../composable-agent-skills.md) (original monorepo plan) and
-[`REVIEW-FINDINGS.md`](../../REVIEW-FINDINGS.md) (five-way adversarial review of it).
+the five-way adversarial review of it, since removed from the repo.
 
 ---
 

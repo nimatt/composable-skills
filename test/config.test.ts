@@ -157,6 +157,39 @@ describe("${home}", () => {
     expect(fs.readdirSync(path.join(ws.root, "outside-out"))).toEqual([".keep"]);
   });
 
+  /**
+   * `String.prototype.replaceAll` expands `$$`, `$&`, "$`", `$'` and `$1` inside a *string*
+   * replacement, and the home path is read from the environment rather than chosen by this tool.
+   * So a `$` in it used to rewrite the substitution instead of being inserted: `$&` put back the
+   * literal `${home}` it had just matched, the resolved root then failed its own containment
+   * check as "outside ${home}", and every `${home}` entry was dropped with an error blaming the
+   * developer's own config.
+   */
+  test("a home path containing $& is substituted literally", () => {
+    const ws = workspace({
+      config: {
+        id: "acme",
+        sources: ["./templates"],
+        overrides: ["${home}/global"],
+        targets: ["./.claude/skills"],
+      },
+      repoFiles: {
+        "templates/e/SKILL.md.tmpl":
+          "---\nname: e\n---\n\n<!-- slot: s -->\nThe template default.\n<!-- /slot -->\n",
+      },
+    });
+    const home = mkdir(ws.root, "dollar$&home");
+    ws.env["COMPOSABLE_SKILLS_HOME"] = home;
+    write(home, { "global/e/s.md": "Read from the personal home.\n" });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(compiled(ws, "e")).toContain("Read from the personal home.");
+    expect(compiled(ws, "e")).not.toContain("The template default.");
+  });
+
   // -------------------------------------------------------------------------------------------
   // EXPECTED TO FAIL — `--check` reports an error and success in the same breath.
   //
@@ -1664,6 +1697,35 @@ describe("a source root holding the build's own output", () => {
       '"build --check" reports stale forever. Keep compiled output and build state outside the ' +
         "source roots.",
     );
+  });
+
+  /**
+   * `computeStamp` walks the override roots exactly as it walks the source roots, so a target root
+   * or the state directory sitting inside one is the identical failure — and while the advisory
+   * looked at `sources` alone it fired for none of them, leaving `--check` permanently stale with
+   * nothing said.
+   */
+  test('overrides: ["."] warns for the same reason a source root does', () => {
+    const ws = workspace({
+      config: {
+        id: "acme",
+        sources: ["./templates"],
+        overrides: ["."],
+        targets: ["./.claude/skills"],
+      },
+      repoFiles: { "templates/x/SKILL.md.tmpl": "---\nname: x\n---\n\nBody.\n" },
+    });
+
+    const run = build(ws);
+
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(run.stdout).toContain('composable-skills: warning override root "." at ');
+    expect(run.stdout).toContain(' contains target root "./.claude/skills" at ');
+    expect(run.stdout).toContain(
+      "Keep compiled output and build state outside the override roots.",
+    );
+    expect(compiled(ws, "x")).toContain("Body.");
   });
 
   /**

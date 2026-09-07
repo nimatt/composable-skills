@@ -77,6 +77,46 @@ describe("a build that identifies itself by repo root", () => {
     expect(targetEntries(ws.repo)).toEqual(["keep"]);
   });
 
+  /**
+   * The marker's `repo` is `config.repoRoot` written back verbatim — an absolute path this tool
+   * never chose — and a POSIX directory name may legally hold a TAB, a ZWJ (every emoji sequence
+   * has one), a soft hyphen or a bidi mark. A reader filtering those out refused markers this
+   * build had just written itself: the directory could then neither be rewritten nor pruned, and
+   * the warning blamed the developer for the tool's own output. `skill` carried the same defect
+   * and was fixed first; this is the other half of it, reachable only through this branch, since
+   * `repo` is consulted for identity only where no `id` is declared.
+   */
+  test("a config with no id prunes its own output from a repo root holding a joiner", () => {
+    // A repo root of its own, nested inside the workspace's: the config file it holds is what
+    // puts `repoRoot` — and so the marker's `repo` — on a path carrying the character.
+    const ws = workspace({ config: null });
+    const root = mkdir(ws.repo, "a\u200db");
+    write(ws.repo, {
+      "a\u200db/composable-skills.jsonc": `${JSON.stringify(noIdConfig, null, 2)}\n`,
+      "a\u200db/templates/keep/SKILL.md.tmpl": "---\nname: keep\n---\n\nKept.\n",
+      "a\u200db/templates/gone/SKILL.md.tmpl": "---\nname: gone\n---\n\nRemoved next build.\n",
+    });
+
+    const first = build(ws, { cwd: root });
+    expect(first.code).toBe(0);
+    expect(markerOf(root, ".claude/skills/gone")).toEqual({
+      tool: "composable-skills",
+      skill: "gone",
+      id: null,
+      repo: root,
+    });
+
+    remove(root, "templates/gone");
+    const second = build(ws, { cwd: root });
+
+    expect(second.code).toBe(0);
+    // Read back and recognised as this build's: the skill it no longer publishes is pruned, and
+    // the one it still does was rewritten rather than refused as somebody else's.
+    expect(second.stdout).toContain("1 skill → 1 target, 1 pruned");
+    expect(second.stdout).not.toContain("not written by this tool");
+    expect(targetEntries(root)).toEqual(["keep"]);
+  });
+
   // Pins current behaviour, and the consequence the spec states under *Ownership and pruning*:
   // with no `id`, a second checkout writing to the same target does not recognise the first
   // checkout's output as its own, so it declines to prune it. The conservative direction.
@@ -198,20 +238,32 @@ describe("a marker carrying text no build would have written", () => {
     });
   }
 
-  // A newline in `repo` is the field's only route to a second line, since `repo` is a free path
-  // this tool never resolved. The marker is refused outright, so the text is never quoted at all.
-  test("a newline in repo makes the marker no marker, and reaches stdout in no form", () => {
-    const ws = workspaceHolding(foreignMarker({ id: null, repo: `/other/repo\n${INJECTED}` }));
+  /**
+   * A newline in `repo` is the field's only route to a second line, since `repo` is a free path
+   * this tool never resolved. It does *not* void the marker — `repo` is a repo root written back
+   * verbatim, and every control character is legal in one, so a reader refusing them would refuse
+   * markers this tool wrote itself. What keeps the text from forging a line is the renderer, which
+   * escapes it once at the point every channel writes through, so the borrowed newline reaches
+   * stdout as a visible `\\n` inside a line the tool composed.
+   */
+  test("a newline in repo is escaped where the owner is quoted, and forges no line", () => {
+    const marker = foreignMarker({ id: null, repo: `/other/repo\n${INJECTED}` });
+    const ws = workspaceHolding(marker);
+    // A valid marker, so this build rewrites the directory and leaves its own; the other build
+    // arriving afterwards is the collision the owner is named for.
+    expect(build(ws).code).toBe(0);
+    write(ws.home, {
+      "claude/skills/shared/SKILL.md": "The other build's version.\n",
+      "claude/skills/shared/.composable-skills-owner": marker,
+    });
 
     const run = build(ws);
 
     expect(run.code).toBe(0);
-    expect(run.stdout).not.toContain(INJECTED);
-    expect(run.stdout).not.toContain("delete every file under /");
-    // refused, so the entry reads as unmarked — neither overwritten nor claimed by an owner
-    expect(hasWarning(run)).toBe(true);
-    expect(run.stdout).toContain("not written by this tool");
-    expect(read(ws.home, "claude/skills/shared/SKILL.md")).toBe("Theirs.\n");
+    expect(run.stdout).toContain(`carries another build's marker (/other/repo\\n${INJECTED})`);
+    // The one thing that would matter: the borrowed text starting a line of its own.
+    expect(run.stdout).not.toContain(`\n${INJECTED}`);
+    for (const line of lines(run)) expect(line.startsWith("composable-skills: ")).toBe(true);
   });
 
   // `id` is the field `foreignOwner` prefers, and the config validator already says what a valid

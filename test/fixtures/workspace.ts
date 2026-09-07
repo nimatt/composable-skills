@@ -363,6 +363,14 @@ interface Capture {
   errPath: string;
 }
 
+/**
+ * The same reason `captureDir()` avoids `fs.mkdirSync`: one test patches `fs.openSync` to record
+ * every path a build opens — the log and the stamp are opened rather than written by path — and
+ * these two descriptors are the fixture's own, not the build's. Bound at load, so no patch a test
+ * installs around a verb can see them.
+ */
+const openCaptureFile = fs.openSync;
+
 function openCapture(routing: StreamRouting): Capture {
   const dir = captureDir();
   const stem = path.join(dir, `run-${captureSeq++}`);
@@ -370,7 +378,12 @@ function openCapture(routing: StreamRouting): Capture {
   const errPath = routing === "shared" ? outPath : `${stem}-stderr`;
   // Two open file descriptions on one path share `dev`/`ino`; two paths do not. That is exactly
   // the distinction `emitReport` makes, so the fixture makes it with real descriptors.
-  return { outFd: fs.openSync(outPath, "a"), errFd: fs.openSync(errPath, "a"), outPath, errPath };
+  return {
+    outFd: openCaptureFile(outPath, "a"),
+    errFd: openCaptureFile(errPath, "a"),
+    outPath,
+    errPath,
+  };
 }
 
 /**
@@ -379,8 +392,8 @@ function openCapture(routing: StreamRouting): Capture {
  * of `init` or `override` is as invocation-independent as a test of `build`.
  *
  * **This whole function is inside any `fs` patch a test has installed around a verb**, and it does
- * its own I/O throughout: `mkdtempSync`/`existsSync` for the capture directory, `openSync` for the
- * two descriptors, `writeSync` on every captured write, `closeSync` on the way out, and
+ * its own I/O throughout: `mkdtempSync`/`existsSync` for the capture directory, `openCaptureFile`
+ * for the two descriptors, `writeSync` on every captured write, `closeSync` on the way out, and
  * `readFileSync` on the capture files *after* the run but still inside the patch window. A patch
  * that throws unconditionally therefore breaks the fixture, not the code under test, and the
  * failure looks like it came from `src/`. Patch through `withFsFailures()` above, which selects by
@@ -503,6 +516,42 @@ export interface CliRun {
 }
 
 /**
+ * A call the child is made to throw from, before `src/cli.ts` loads, so that a verb crashes the
+ * way `main()`'s last-resort catch blocks assume something one day will.
+ *
+ * It is injected rather than arranged out of a workspace's contents because it cannot be arranged
+ * out of one: every `fs` call a verb makes is already inside a guard that turns the failure into a
+ * diagnostic, which is what fail-soft means, so nothing on disk reaches those catch blocks. What
+ * reaches them is a call nobody expected to fail — so that is what is broken here. Both of these
+ * can genuinely fail: `process.cwd()` throws `ENOENT` once the working directory has been removed
+ * out from under the process, and `os.hostname()` is a syscall like any other.
+ *
+ * There are two because they break different verbs at different depths. `process.cwd()` is the
+ * first thing every verb touches — the CLI passes no `cwd`, so each defaults to it — and it takes
+ * `crashStateDir()` down with it, which is the crash whose own cause has removed the ground the
+ * crash *report* would stand on. `os.hostname()` is reached only by `build`, in the lock, deep
+ * enough that the config has loaded and the log file has somewhere to go.
+ *
+ * `withFsFailures()` is no use here: a patch installed in this process does not cross into a
+ * spawned one, and the CLI can only be observed in a spawned one.
+ */
+export type BrokenCall = "process.cwd" | "os.hostname";
+
+export interface CliOptions {
+  breaks?: BrokenCall[];
+}
+
+function breakCall(call: BrokenCall): string {
+  const message = `injected by the test fixture, ${call} failed`;
+  const thrower =
+    `() => { const failure: NodeJS.ErrnoException = new Error(${JSON.stringify(message)}); ` +
+    'failure.code = "ENOENT"; throw failure; }';
+  return call === "process.cwd"
+    ? `(process as unknown as { cwd: () => string }).cwd = ${thrower};`
+    : `(os as unknown as { hostname: () => string }).hostname = ${thrower};`;
+}
+
+/**
  * `src/cli.ts` in a child process, which is the only way to observe the exit code it actually
  * produces — it sets `process.exitCode` at module scope, so importing it here would both run the
  * CLI against the test runner's own argv and hand its verdict to `bun test`.
@@ -511,7 +560,7 @@ export interface CliRun {
  * `captured()` does: no run started by this fixture may see the developer's real home. Both
  * descriptors are pipes, so the routing is `separate` and cannot depend on the invoking shell.
  */
-export function cli(ws: Workspace, args: string[], cwd = ws.repo): CliRun {
+export function cli(ws: Workspace, args: string[], options: CliOptions = {}): CliRun {
   const shim = path.join(tempDir(), "cli-shim.ts");
   const cliPath = path.join(import.meta.dir, "..", "..", "src", "cli.ts");
   fs.writeFileSync(
@@ -520,6 +569,7 @@ export function cli(ws: Workspace, args: string[], cwd = ws.repo): CliRun {
       'import os from "node:os";',
       `const home = ${JSON.stringify(ws.osHome)};`,
       "(os as unknown as { homedir: () => string }).homedir = () => home;",
+      ...(options.breaks ?? []).map(breakCall),
       `await import(${JSON.stringify(cliPath)});`,
       "",
     ].join("\n"),
@@ -527,7 +577,7 @@ export function cli(ws: Workspace, args: string[], cwd = ws.repo): CliRun {
   );
   const spawned = Bun.spawnSync({
     cmd: [process.execPath, "run", shim, ...args],
-    cwd,
+    cwd: ws.repo,
     env: { ...ws.env, PATH: process.env.PATH ?? "" },
     stdout: "pipe",
     stderr: "pipe",

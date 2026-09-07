@@ -37,9 +37,19 @@ jobs:
         run: bun test
 
   smoke:
-    # Turns `engines: ">=20"` from an untested assertion into a checked fact. Loading the built
-    # bundle is exactly where a syntax error or an API below the floor surfaces, so running the
-    # two no-op verbs on each supported node is enough to catch it.
+    # Turns `engines: ">=20"` from an untested assertion into a checked fact -- but only for code
+    # that actually runs, which is why this job does more than load the bundle. `--version` and
+    # `--help` return from the first two branches of `main()` (src/cli.ts) without ever calling
+    # `runBuild`, `runInit` or `runOverride`, so they catch a syntax error and nothing else: a call
+    # to a node API newer than the floor lives inside those verbs and is reached only when a verb
+    # is.
+    #
+    # Nothing else in the repo catches one either. `tsconfig.src.json` pins `lib` to ES2023, which
+    # rejects a language-level global like `Promise.withResolvers` (node 22) -- but `@types/node`
+    # types every node builtin regardless of the node version it landed in, so `fs.globSync`
+    # (node 22) typechecks clean, lints clean, passes `bun test` (bun implements it) and builds.
+    # This job is the only thing between that and a `TypeError: fs.globSync is not a function` for
+    # the first user on node 20, so the steps below have to execute the verbs, not just load them.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -61,6 +71,57 @@ jobs:
         run: bun run build
 
       - name: Run the built CLI on node ${{ matrix.node }}
+        # Run from a scratch directory, never the checkout: `build` and `init` both write into the
+        # repo they are pointed at, and `init` would then report on this repo's own files.
+        #
+        # The four verb invocations are chosen to reach every module in `src/`, since a module the
+        # matrix never loads is a module the matrix cannot vouch for: `build` parses the config,
+        # discovers the skill, compiles it through the slot and frontmatter machinery, emits it and
+        # writes the stamp; `build --check` reads that stamp back; `override --dry-run` walks the
+        # override-root resolution chain; `init --dry-run` walks the settings, gitignore and diff
+        # path. Each exits 0 on a healthy tree, so `bash -e` fails the step on any non-zero.
         run: |
-          node dist/cli.js --version
-          node dist/cli.js --help
+          node "$GITHUB_WORKSPACE/dist/cli.js" --version
+          node "$GITHUB_WORKSPACE/dist/cli.js" --help
+
+          mkdir -p "$RUNNER_TEMP/smoke/skills/templates/hello"
+          cd "$RUNNER_TEMP/smoke"
+          printf '{ "id": "smoke", "sources": ["./skills/templates"] }\n' > composable-skills.jsonc
+          printf '%s\n' \
+            '---' \
+            'name: hello' \
+            'description: A smoke-test skill, compiled so the matrix executes the compiler.' \
+            '---' \
+            '' \
+            '<!-- slot: greeting -->' \
+            'Hello.' \
+            '<!-- /slot -->' \
+            > skills/templates/hello/SKILL.md.tmpl
+
+          node "$GITHUB_WORKSPACE/dist/cli.js" build
+          test -f .claude/skills/hello/SKILL.md
+          node "$GITHUB_WORKSPACE/dist/cli.js" build --check
+          node "$GITHUB_WORKSPACE/dist/cli.js" override hello greeting --dry-run
+          node "$GITHUB_WORKSPACE/dist/cli.js" init --dry-run
+
+      - name: Install the packed tarball on node ${{ matrix.node }}
+        # Everything above builds `dist/` in place and runs it out of the checkout, which says
+        # nothing about the artifact users actually install. That gap matters here because
+        # `src/settings.ts` hard-codes `node_modules/composable-skills/dist/cli.js` into the
+        # SessionStart hook it writes into users' repos, and `test/init.test.ts` asserts the same
+        # literal -- so renaming the entry point or changing `--outdir` would keep CI and the suite
+        # green while every emitted hook pointed at a file that does not exist, and silently,
+        # because the hook is fail-soft. So: pack it (`prepack` rebuilds `dist/`), install the
+        # tarball into an empty project, and run it by both paths a user gets -- the bin shim npm
+        # links, and the literal path the hook string names.
+        #
+        # `mkdir -p` first is load-bearing: `npm pack --pack-destination` requires the destination
+        # to exist already -- it does not create it, and fails with ENOENT if it is missing.
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack" "$RUNNER_TEMP/consumer"
+          npm pack --pack-destination "$RUNNER_TEMP/pack"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y
+          npm install "$RUNNER_TEMP"/pack/composable-skills-*.tgz
+          node node_modules/composable-skills/dist/cli.js --version
+          ./node_modules/.bin/composable-skills --version

@@ -35,14 +35,24 @@ export function applyStep(step: InitStep, repoRoot: string): void {
   if (hop !== null) throw new Error(`refusing to write through the symlink at ${hop}`);
   fs.mkdirSync(path.dirname(step.path), { recursive: true });
   const staging = `${step.path}.composable-skills-tmp-${crypto.randomBytes(4).toString("hex")}`;
-  fs.writeFileSync(staging, step.after ?? "", "utf8");
+  /**
+   * A rename replaces the inode, so the mode of the file being edited is not carried over by
+   * anything but this. A `600` settings file is a decision — these can carry `env` values — and a
+   * merge that silently widens it to the umask default is a permission change nobody asked for
+   * and nobody would see.
+   *
+   * The mode is read *before* the staging file is written and passed to its creation, so the
+   * merged content never exists at a wider mode than the file it is replacing, not even for the
+   * instant between a write and a `chmod`. The `chmod` below still runs, because a creation mode
+   * is masked by the umask and so can only come out narrower than asked for.
+   */
+  const mode = fileMode(step.path);
+  fs.writeFileSync(staging, step.after ?? "", {
+    encoding: "utf8",
+    mode: mode ?? 0o666,
+    flag: "wx",
+  });
   try {
-    /**
-     * A rename replaces the inode, so the mode of the file being edited is not carried over by
-     * anything but this. A `600` settings file is a decision, and a merge that silently widens it
-     * to the umask default is a permission change nobody asked for and nobody would see.
-     */
-    const mode = fileMode(step.path);
     if (mode !== null) fs.chmodSync(staging, mode);
     fs.renameSync(staging, step.path);
   } catch (cause) {

@@ -113,7 +113,14 @@ export function runBuild(options: BuildOptions): number {
     emitReport([...live, ...replayed, warning(lock.message)], [], logDir);
     return 0;
   }
-  if (lock.kind === "unavailable") diagnostics.push(warning(lock.message));
+  /**
+   * An observation about this run's environment rather than about the tree, so it goes where the
+   * `busy` message above goes and never into the stamp: `diagnostics` is what `writeStamp`
+   * persists as the last real build's account of the corpus, and a one-off `EACCES` on the state
+   * directory would otherwise be replayed as `[last build] building without a lock` at every
+   * session start until an input hash changed.
+   */
+  if (lock.kind === "unavailable") live.push(warning(lock.message));
 
   /**
    * Read before anything writes, because `emitSkill` creates the target itself. A target that was
@@ -200,7 +207,7 @@ export function runBuild(options: BuildOptions): number {
       }
     }
 
-    writeStamp(config, { stamp, failed, outputs, diagnostics });
+    diagnostics.push(...writeStamp(config, { stamp, failed, outputs, diagnostics }));
   } finally {
     if (lock.kind === "held") lock.release();
   }

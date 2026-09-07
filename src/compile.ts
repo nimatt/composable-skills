@@ -20,6 +20,7 @@ import type { ContainmentFailure } from "./contain.ts";
 import { resolveContainedFile } from "./contain.ts";
 import type { LineOrigin, SourceLine } from "./directives.ts";
 import { expandIncludes, parseSlots, renderSlots, trimBlockEdges } from "./directives.ts";
+import type { Finding } from "./validate.ts";
 import {
   checkFrontmatterIdentity,
   findConflictMarkers,
@@ -45,6 +46,13 @@ export function compileSkill(skill: DiscoveredSkill, config: Config): CompileRes
   const fail = (message: string, extra: DiagnosticLocation = {}) => {
     diagnostics.push(error(message, { skill: skill.name, file: skill.templatePath, ...extra }));
   };
+  /** A finding that carries its own severity, for the one scan that does not always reject. */
+  const report = (finding: Finding, extra: DiagnosticLocation = {}) => {
+    const make = finding.severity === "warning" ? warning : error;
+    diagnostics.push(
+      make(finding.message, { skill: skill.name, file: skill.templatePath, ...extra }),
+    );
+  };
 
   let raw: string;
   try {
@@ -55,7 +63,7 @@ export function compileSkill(skill: DiscoveredSkill, config: Config): CompileRes
   }
 
   for (const finding of findConflictMarkers(raw)) {
-    fail(finding.message, { line: finding.line });
+    report(finding, { line: finding.line });
   }
 
   const split = splitFrontmatter(raw);
@@ -77,7 +85,7 @@ export function compileSkill(skill: DiscoveredSkill, config: Config): CompileRes
   }
   for (const fragment of included.fragments) {
     for (const finding of findConflictMarkers(fragment.text, fragment.path)) {
-      fail(finding.message, { file: fragment.path, line: finding.line });
+      report(finding, { file: fragment.path, line: finding.line });
     }
   }
 
@@ -222,12 +230,14 @@ export function resolveSlot(
     }
 
     const conflicts = findConflictMarkers(text, file);
-    if (conflicts.length > 0) {
-      for (const finding of conflicts) {
-        diagnostics.push(error(finding.message, { skill: skillName, file, line: finding.line }));
-      }
-      return fromDefault();
+    for (const finding of conflicts) {
+      const make = finding.severity === "warning" ? warning : error;
+      diagnostics.push(make(finding.message, { skill: skillName, file, line: finding.line }));
     }
+    // A warned-about line is one the build is letting through, so the override still wins its slot
+    // — falling back to the default here would swap the author's text for the template's over a
+    // line that may well be a heading underline.
+    if (conflicts.some((finding) => finding.severity !== "warning")) return fromDefault();
 
     override = trimBlockEdges(text, file);
     from = root;
@@ -309,7 +319,15 @@ function collectExtras(skill: DiscoveredSkill, diagnostics: Diagnostic[]): Extra
         continue;
       }
       if (!entry.isFile()) continue;
-      if (prefix === "" && entry.name === TEMPLATE_FILENAME) continue;
+      /**
+       * Case-folded, like the owned-name guard above it and for the same reason. `discoverSkills`
+       * finds the template by `stat`ing the path it composes, so on a case-insensitive filesystem —
+       * APFS by default, and Windows — a source file named `skill.md.tmpl` *is* the template that
+       * was compiled. An exact-case compare here failed to recognise it and copied the raw
+       * template, slot and include directives and all, into the emitted skill directory beside the
+       * `SKILL.md` compiled from it.
+       */
+      if (prefix === "" && entry.name.toLowerCase() === TEMPLATE_FILENAME.toLowerCase()) continue;
       extras.push({ from, rel });
     }
   };

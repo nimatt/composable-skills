@@ -81,29 +81,43 @@ const MARKER_FIELD_MAX = 4096;
 /**
  * The largest a marker file may be, checked against `stat` before it is opened — `MARKER_FIELD_MAX`
  * is applied only once `JSON.parse` has already built the whole file in memory, so on its own it
- * bounds nothing. Derived rather than picked: `readMarker` accepts four fields, each at most
- * `MARKER_FIELD_MAX` UTF-16 units long, and JSON's widest spelling of one such unit is six bytes
- * (`\uXXXX`). So no file under this bound could have been rejected for size, and nothing over it
- * is anything but padding around a marker that would have fit.
+ * bounds nothing. Derived rather than picked: `readMarker` accepts four fields, none of which can
+ * exceed `MARKER_FIELD_MAX` UTF-16 units. Two are bounded by `markerField` saying so — `id` and
+ * `repo` — and two by being accepted only as equalities: `tool` against a fixed literal, `skill`
+ * against the skill directory's own name, which no filesystem lets approach the length of a whole
+ * path. JSON's widest spelling of one such unit is six bytes (`\uXXXX`). So no file under this
+ * bound could have been rejected for size, and nothing over it is anything but padding around a
+ * marker that would have fit.
  */
 const MARKER_FILE_MAX = MARKER_FIELD_MAX * 4 * 6;
 
-const CONTROL_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
-
 /**
- * Every marker field is display-untrusted: it is quoted back in a diagnostic, and nothing about
- * the file it came from is this build's. `report.ts` makes any text safe to render; rejecting
- * here as well is what keeps a marker that could only have been hand-made from being read as a
- * claim at all. A rejected marker reads as *unmarked*, which is the conservative end — the
- * directory is neither overwritten nor pruned.
+ * A marker field, bounded in length and in nothing else. `repo` is why the bound is all there is:
+ * it is `config.repoRoot` written back verbatim, an absolute path this tool never chose, and a
+ * control character is legal in every component of one — a TAB, a ZWJ, a soft hyphen or a bidi
+ * mark in any ancestor directory. Filtering those out here would void a marker this build had just
+ * written for itself, the same defect `skill` carried: the directory could then neither be
+ * rewritten nor pruned, and the warning blamed the developer for a directory the tool had
+ * written itself.
+ * Nothing is given up by that, because display safety was never held here — `report.ts` escapes
+ * every line-breaking character in every line it renders, once, at the point each channel renders
+ * through, where no later source of borrowed text can miss it. What a field must still not be is
+ * *unbounded*: `foreignOwner` quotes whichever one names the owner into a warning that reaches a
+ * model as instructions.
  */
-function markerText(value: unknown): string | null {
+function markerField(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  if (value.length > MARKER_FIELD_MAX) return null;
-  return CONTROL_CHARACTER.test(value) ? null : value;
+  return value.length > MARKER_FIELD_MAX ? null : value;
 }
 
 function readMarker(directory: string): OwnerRecord | null {
+  return readMarkerNaming(directory, (skill) => skill === path.basename(directory));
+}
+
+function readMarkerNaming(
+  directory: string,
+  namesTheDirectory: (skill: string) => boolean,
+): OwnerRecord | null {
   const raw = readMarkerFile(directory);
   if (raw === null) return null;
   let parsed: unknown;
@@ -120,13 +134,26 @@ function readMarker(directory: string): OwnerRecord | null {
    * something. `{"tool":"composable-skills"}` alone would otherwise make an unmarked directory
    * overwritable, and a `skill` that does not match the directory it sits in is a marker that was
    * copied rather than written here.
+   *
+   * Compared to the directory name rather than merely bounded as a field: `skill` is written
+   * verbatim from a directory name this tool did not choose and is never rendered — `foreignOwner`
+   * quotes `id ?? repo` — so a control-character filter bought nothing there and cost the round
+   * trip. A directory name may legally hold a TAB, a ZWJ (every emoji sequence has one) or a soft
+   * hyphen, and a marker this build had just written for such a skill read back as *unmarked*: the
+   * directory could then neither be rewritten nor pruned, and the warning blamed the developer for
+   * output the tool itself had emitted.
    */
-  const skill = markerText(record["skill"]) ?? "";
-  if (skill === "" || skill !== path.basename(directory)) return null;
-  /** The shape the config validator holds this repo's own `id` to; a marker declares the same. */
-  const declaredId = markerText(record["id"]);
+  const skill = record["skill"];
+  if (typeof skill !== "string" || skill === "" || !namesTheDirectory(skill)) return null;
+  /**
+   * The shape the config validator holds this repo's own `id` to; a marker declares the same. It
+   * admits `[A-Za-z0-9._-]` and nothing else, so it is also what keeps a declared `id` clear of
+   * everything `markerField` no longer rejects — `repo` is the field that had to widen, being a
+   * path rather than a name this tool gets to constrain.
+   */
+  const declaredId = markerField(record["id"]);
   const id = declaredId !== null && isValidId(declaredId) ? declaredId : null;
-  const repo = markerText(record["repo"]) ?? "";
+  const repo = markerField(record["repo"]) ?? "";
   if (id === null && repo === "") return null;
   return { skill, id, repo };
 }
@@ -167,6 +194,26 @@ function matchesThisBuild(marker: OwnerRecord, config: Config): boolean {
  */
 export function ownedByThisBuild(directory: string, config: Config): boolean {
   const marker = readMarker(directory);
+  return marker !== null && matchesThisBuild(marker, config);
+}
+
+/**
+ * `ownedByThisBuild` for a directory whose own name is not the skill's — which is every scratch
+ * directory `emit.ts` makes: a `-tmp-` staging area is marked before anything else goes into it,
+ * and a `-old-` parked copy is the emitted directory itself, marker and all. `readMarker`'s rule
+ * that a marker names the directory it sits in cannot be put to
+ * `.composable-skills-old-<skill>-<suffix>`, so the caller puts the question its own naming can
+ * answer instead. It has to be asked somehow: a marker that does not fit the name it is standing
+ * in was copied there rather than written there. And the fit is what the caller decides rather
+ * than what this returns, because `MARKER_FILE_MAX`'s whole derivation rests on `skill` only ever
+ * being weighed against a name, never taken on the field's own word.
+ */
+export function markedByThisBuildFor(
+  directory: string,
+  config: Config,
+  namesTheDirectory: (skill: string) => boolean,
+): boolean {
+  const marker = readMarkerNaming(directory, namesTheDirectory);
   return marker !== null && matchesThisBuild(marker, config);
 }
 

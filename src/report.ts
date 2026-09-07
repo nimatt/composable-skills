@@ -5,6 +5,7 @@ import type { Diagnostic } from "./types.ts";
 import { error } from "./types.ts";
 import { findConfigFile, findRepoRoot } from "./config.ts";
 import { LOG_FILENAME, stateDir } from "./layout.ts";
+import { ensureRealDir, openForWriteNoFollow } from "./fsutil.ts";
 
 /**
  * A diagnostic quotes the line it rejected, so the log can hold whatever a template, fragment or
@@ -112,6 +113,17 @@ function renderLines(lines: string[]): string {
 }
 
 /**
+ * What the log records for a run that had nothing to say. The gated run over a healthy repo is
+ * exactly that run, and it is the common case at every session start — so a log written only when
+ * there were lines is a log that, once deleted, never comes back in the repos that are working.
+ * The spec makes the file a record *that the build ran*, not only of what it complained about, so
+ * the run is written down: a reader can tell a build that found nothing from one that never
+ * happened, and the timestamp above it dates the last session either way. It goes to the file
+ * alone, because saying nothing on stdout and stderr is the whole point of a gated run.
+ */
+const NOTHING_TO_REPORT = "composable-skills: nothing to report\n";
+
+/**
  * `stateDirectory` is null for a run that must write no file — `--check` writes nothing, and a
  * run that never resolved a config has nowhere to write.
  */
@@ -124,20 +136,26 @@ export function emitReport(
     ...diagnostics.map(formatDiagnostic),
     ...summary.map((line) => `composable-skills: ${line}`),
   ];
-  if (lines.length === 0) return;
-  const text = renderLines(lines);
+  const text = lines.length === 0 ? "" : renderLines(lines);
 
-  writeToStreams(text);
+  if (text !== "") writeToStreams(text);
 
   if (stateDirectory === null) return;
   try {
-    fs.mkdirSync(stateDirectory, { recursive: true });
-    const logPath = path.join(stateDirectory, LOG_FILENAME);
-    fs.writeFileSync(logPath, `${new Date().toISOString()}\n${text}`, {
-      encoding: "utf8",
-      mode: LOG_MODE,
-    });
-    fs.chmodSync(logPath, LOG_MODE);
+    ensureRealDir(stateDirectory);
+    // A symlink removed here is deliberately not reported: this is the reporter, the report for
+    // this run has already gone to the streams, and a diagnostic raised now has nowhere honest to
+    // go. `writeStamp` names the one it removes, which covers the same planted-link attempt.
+    const log = openForWriteNoFollow(path.join(stateDirectory, LOG_FILENAME), LOG_MODE);
+    try {
+      // Before the write, not after it: a pre-existing log left group- or world-readable must not
+      // be readable for the span in which this run's diagnostics are landing in it.
+      fs.fchmodSync(log.handle, LOG_MODE);
+      const body = text === "" ? NOTHING_TO_REPORT : text;
+      fs.writeFileSync(log.handle, `${new Date().toISOString()}\n${body}`, "utf8");
+    } finally {
+      fs.closeSync(log.handle);
+    }
   } catch {
     // the log is a convenience; never let it break a build
   }

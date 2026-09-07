@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -61,6 +62,19 @@ function commandsOf(settings: unknown): unknown[] {
     (group.hooks ?? []).map((entry) => entry.command),
   );
 }
+
+/**
+ * Whether the suite is running as uid 0. `init` enforces every permission it enforces through the
+ * kernel — `access(2)` for writability, `open(2)` for readability — and root is exempt from both,
+ * so a test that arranges a mode with `chmod` and asserts the refusal it should draw asserts
+ * nothing under root: it does not pass, it fails, and has to skip instead.
+ *
+ * A test asserting the mode stored in the inode needs no guard: `open` and `fchmod` record what
+ * they are told whoever runs them. And where the refused branch has to stay covered under root as
+ * well, the twin beside it arranges the same failure through `withFsFailures()` rather than
+ * through a mode, which no uid is exempt from.
+ */
+const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 describe("init — diff first", () => {
   test("a dry run writes nothing at all", () => {
@@ -843,24 +857,72 @@ describe("init — a mode is a decision about a file", () => {
     expect(modeOf(ws.repo, ".claude/settings.json")).toBe(0o600);
   });
 
-  test("a file the process cannot write is refused in the plan, so the dry run says so", () => {
+  /**
+   * **Finding 26.** The test above pins the mode the swap ends at; this one pins the span before
+   * it. The staging file was created at the umask default and narrowed only afterwards, so the
+   * merged content of a deliberately-`600` settings file — these can carry `env` values — sat
+   * group- and world-readable, under a name inside the repo, for the width of a write. The mode is
+   * now handed to the call that creates the file, so it is never wider than the file it replaces.
+   *
+   * `fs.chmodSync` is patched here rather than driven through `withFsFailures()`, which injects
+   * failures and cannot observe: what has to be seen is the mode the staging file was *created*
+   * with, and that is only visible in the instant between the write and the chmod. This patch
+   * records and delegates, so nothing about the run changes. No `skipIf(asRoot)`: the assertion is
+   * on the mode stored in the inode, which `open` records the same whoever runs it.
+   */
+  test("the staging file is created at the mode it will end at, never wider", () => {
     const ws = freshRepo({ ".claude/settings.json": OWNER_ONLY });
-    chmod(ws.repo, ".claude/settings.json", 0o444);
+    chmod(ws.repo, ".claude/settings.json", 0o600);
 
-    const dry = init(ws);
+    const stagedAs: number[] = [];
+    const realChmod = fs.chmodSync;
+    const patchable = fs as { chmodSync: typeof fs.chmodSync };
+    let run: BuildRun;
+    try {
+      patchable.chmodSync = (target, mode) => {
+        if (String(target).includes("composable-skills-tmp")) {
+          stagedAs.push(fs.statSync(target).mode & 0o777);
+        }
+        realChmod(target, mode);
+      };
+      run = init(ws, { write: true });
+    } finally {
+      patchable.chmodSync = realChmod;
+    }
 
-    // `rename(2)` does not consult the mode, so refusing here is the only place it means anything.
-    expect(dry.code).toBe(1);
-    expect(dry.stdout).toContain(
-      `${path.join(ws.repo, ".claude", "settings.json")} is not writable (mode 444)`,
-    );
-    expect(dry.stdout).toContain(
-      "refused  .claude/settings.json — not writable — left exactly as it is",
-    );
-    expect(dry.stdout).not.toContain("would update  .claude/settings.json");
+    expect(run.code).toBe(0);
+    // One staging file was chmod'd — the settings merge — and it was already owner-only.
+    expect(stagedAs).toEqual([0o600]);
+    expect(modeOf(ws.repo, ".claude/settings.json")).toBe(0o600);
   });
 
-  test("and --write leaves it byte-identical, at the mode it had", () => {
+  /**
+   * `skipIf(asRoot)` on both halves: `isWritable` asks `access(2)` for `W_OK`, which succeeds for
+   * uid 0 whatever the mode says, so under a root runner `init` would not refuse at all and these
+   * would fail rather than skip. The refusal is the assertion, and root defeats what enforces it.
+   */
+  test.skipIf(asRoot)(
+    "a file the process cannot write is refused in the plan, so the dry run says so",
+    () => {
+      const ws = freshRepo({ ".claude/settings.json": OWNER_ONLY });
+      chmod(ws.repo, ".claude/settings.json", 0o444);
+
+      const dry = init(ws);
+
+      // `rename(2)` does not consult the mode, so refusing here is the only place it means
+      // anything.
+      expect(dry.code).toBe(1);
+      expect(dry.stdout).toContain(
+        `${path.join(ws.repo, ".claude", "settings.json")} is not writable (mode 444)`,
+      );
+      expect(dry.stdout).toContain(
+        "refused  .claude/settings.json — not writable — left exactly as it is",
+      );
+      expect(dry.stdout).not.toContain("would update  .claude/settings.json");
+    },
+  );
+
+  test.skipIf(asRoot)("and --write leaves it byte-identical, at the mode it had", () => {
     const ws = freshRepo({ ".claude/settings.json": OWNER_ONLY });
     chmod(ws.repo, ".claude/settings.json", 0o444);
 
@@ -873,8 +935,6 @@ describe("init — a mode is a decision about a file", () => {
     expect(exists(ws.repo, "composable-skills.jsonc")).toBe(true);
   });
 });
-
-const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 /**
  * Mode 000, which is a different file from the mode 444 above: that one can be read, so the plan
@@ -1008,6 +1068,36 @@ describe("init — a file that exists but cannot be read", () => {
     );
     expect(run.stdout).toContain("could not check whether a hook there already runs this tool");
     expect(commandsOf(settingsOf(ws))).toEqual([HOOK_COMMAND]);
+  });
+
+  /**
+   * The always-running twin of the test above. That one arranges the failure with `chmod 000`, so
+   * it has to skip under a root runner — `open(2)` hands uid 0 the file whatever the mode says.
+   * The user-level test below is not a substitute: it is about the *other* file, and asserts the
+   * other two sentences ("your user-level settings", "init never writes that file either way."),
+   * so without this the repo-local branch would go entirely uncovered wherever the suite runs as
+   * root. Injecting the read failure covers it for every runner, root included.
+   */
+  test("the same settings.local.json under an injected read failure warns the same way", () => {
+    const ws = freshRepo({ ".claude/settings.local.json": SETTINGS });
+    const target = path.join(ws.repo, ".claude", "settings.local.json");
+
+    const { result: run, fired } = withFsFailures({ calls: ["readFileSync"], when: target }, () =>
+      init(ws, { write: true }),
+    );
+
+    expect(fired).toContain(`readFileSync ${target}`);
+    expect(run.code).toBe(0);
+    expect(hasError(run)).toBe(false);
+    expect(hasWarning(run)).toBe(true);
+    expect(run.stdout).toContain(
+      `${target} — this repo's untracked personal settings — exists but could not be read`,
+    );
+    expect(run.stdout).toContain("could not check whether a hook there already runs this tool");
+    // The run still did its own job: the project file was merged and the hook is in it.
+    expect(commandsOf(settingsOf(ws))).toEqual([HOOK_COMMAND]);
+    // And the file it could not read is still exactly as it was — `init` never writes it.
+    expect(read(ws.repo, ".claude/settings.local.json")).toBe(SETTINGS);
   });
 
   test("an unreadable user-level settings file warns too, and does not refuse", () => {
