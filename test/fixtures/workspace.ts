@@ -663,7 +663,19 @@ export function cli(ws: Workspace, args: string[], options: CliOptions = {}): Cl
   const spawned = Bun.spawnSync({
     cmd: [process.execPath, "run", shim, ...args],
     cwd: ws.repo,
-    env: { ...ws.env, PATH: process.env.PATH ?? "" },
+    /**
+     * `HOME` is redirected to `ws.osHome`, which sits inside the tree the snapshot assertions
+     * walk -- so bun's own runtime transpiler cache lands in `os-home/.bun/install/cache/@t@/`
+     * and reads as a write the verb under test made. `"0"` disables that cache for the child.
+     *
+     * It has to be disabled rather than filtered out of the snapshot: `~` is a place the verbs
+     * genuinely write (`~/.claude/settings.json`, a `~/.claude/skills` target), so a snapshot
+     * that learned to skip parts of `os-home` would stop proving the thing it exists to prove.
+     *
+     * Bun 1.4.2 writes this cache and 1.3.14 does not, which is why the suite passed locally and
+     * failed on CI, where `oven-sh/setup-bun` installs the latest release.
+     */
+    env: { ...ws.env, PATH: process.env.PATH ?? "", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
     stdout: "pipe",
     stderr: "pipe",
   });
