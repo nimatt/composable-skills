@@ -14,7 +14,7 @@
   },
   "type": "module",
   "bin": {
-    "composable-skills": "./dist/cli.js"
+    "composable-skills": "dist/cli.js"
   },
   "files": [
     "dist"
