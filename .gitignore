@@ -9,6 +9,9 @@ dist
 # this tool's own state directory, when the repo dogfoods itself
 .composable-skills/
 
+# review output, written by tooling and not part of the repo's documentation
+docs/review/
+
 # code coverage
 coverage
 *.lcov

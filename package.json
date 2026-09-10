@@ -1,9 +1,17 @@
 {
   "name": "composable-skills",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "A node CLI that compiles skill templates into SKILL.md files and writes them where an agent harness will find them.",
   "license": "MIT",
   "author": "Mattias Nilsson",
+  "homepage": "https://github.com/nimatt/composable-skills#readme",
+  "bugs": {
+    "url": "https://github.com/nimatt/composable-skills/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nimatt/composable-skills.git"
+  },
   "type": "module",
   "bin": {
     "composable-skills": "./dist/cli.js"
@@ -27,7 +35,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.src.json && tsc --noEmit -p tsconfig.json",
     "format": "biome format --write .",
     "lint": "biome check .",
-    "prepack": "bun run build"
+    "prepack": "bun run build",
+    "prepublishOnly": "bun run typecheck && bun run lint && bun test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",

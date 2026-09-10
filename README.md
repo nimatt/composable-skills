@@ -8,16 +8,16 @@ at the points its author chose, and neither side's edits are lost when the other
 The tool ships no skills of its own — it compiles whatever templates the repo installing it
 points at.
 
-## Status: unreleased, work in progress
+## Status: early
 
-Nothing is published yet, and the CLI is incomplete. **Three of the five verbs work** — the
-compiler, the setup verb, and the one a developer uses day to day.
+Published, and incomplete. **Three of the five verbs work** — the compiler, the setup verb, and
+the one a developer uses day to day.
 
 | Verb | State |
 |---|---|
-| `build [--check]` | implemented (unreleased) |
-| `init [--write\|--dry-run]` | implemented (unreleased) — Claude Code only |
-| `override <skill> <slot> [--write\|--dry-run]` | implemented (unreleased) |
+| `build [--check]` | implemented |
+| `init [--write\|--dry-run]` | implemented — Claude Code only |
+| `override <skill> <slot> [--write\|--dry-run]` | implemented |
 | `lint` | planned (Phase 4) |
 | `explain [<skill>]` | planned (Phase 5) |
 
@@ -29,9 +29,6 @@ until a `1.0.0` release.
 
 ## Install
 
-Nothing is on the registry yet, so this command will not work today. It is how the tool will be
-installed from the first published release onwards.
-
 ```bash
 npm install --save-dev composable-skills
 ```
@@ -42,10 +39,10 @@ is out of scope — it has no `node_modules`, so the path-based invocation break
 
 ## Development
 
-Until there is a release, a checkout is the only way to run the tool. Bun is the development
-runtime, the test runner and the bundler; the shipped artifact is not — `src/` uses `node:*`
-APIs only and is bundled with `--target=node`, and CI executes that bundle on node 20, 22 and
-24 to keep `engines` honest.
+A checkout is how the tool itself is worked on. Bun is the development runtime, the test runner
+and the bundler; the shipped artifact is not — `src/` uses `node:*` APIs only and is bundled
+with `--target=node`, and CI executes that bundle on node 20, 22 and 24 to keep `engines`
+honest.
 
 ```bash
 bun install

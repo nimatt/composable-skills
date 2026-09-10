@@ -13,8 +13,8 @@ const REPO = path.join(import.meta.dir, "..");
 /**
  * `toolVersion()` finds `package.json` at `..` from its own module, and the two layouts that ship
  * put it in different places: `src/layout.ts` during development, and the bundled `dist/cli.js`
- * this module is folded into for release. A failed lookup falls back to `"0.0.0"`, which is also
- * the version the package currently declares — so asserting against the real package proves
+ * this module is folded into for release. A failed lookup falls back to `"0.0.0"`, one patch
+ * below the version the package declares — so asserting against the real package proves close to
  * nothing. Both layouts are smoke-tested against a copy whose version cannot be mistaken for the
  * fallback.
  */
